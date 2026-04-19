@@ -21,6 +21,17 @@ tools, battle debugger, and core game fixes.
 2. Start the game
 3. Check `BepInEx/LogOutput.log`
 
+### Steam Deck / Proton
+
+The game runs via Proton on Steam Deck. You must add this as **Steam Launch Options**
+(right-click game → Properties → Launch Options):
+
+```
+WINEDLLOVERRIDES="winhttp=native,builtin" %command%
+```
+
+Without this, Proton uses its own `winhttp.dll` and BepInEx will not load.
+
 Correct layout:
 
 ```text

@@ -51,6 +51,23 @@ Chainloader ready
 Chainloader startup complete
 ```
 
+## Steam Deck / Proton (Linux)
+
+The game runs via Proton on Steam Deck. Proton uses its own `winhttp.dll` by
+default, which prevents BepInEx's doorstop from loading. You must override this.
+
+**Set Steam Launch Options** (right-click game → Properties → Launch Options):
+
+```
+WINEDLLOVERRIDES="winhttp=native,builtin" %command%
+```
+
+This tells Proton to load the `winhttp.dll` from the game folder (the BepInEx
+doorstop) instead of its built-in Wine version.
+
+After setting this, launch the game and verify BepInEx loads by checking for
+`BepInEx/LogOutput.log`.
+
 ## Included Mods
 
 | Mod | GUID | Type | Hotkey |
