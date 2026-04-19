@@ -34,7 +34,7 @@ timescale <value>             Change Time.timeScale
 credits                       Show player credits
 addcredits <amount>           Add credits via FactionsManager
 setcredits <amount>           Set credits directly
-economy                       Print GlobalMarket snapshot
+economy                       Print GlobalMarket snapshot with supply/demand per resource
 objects <TypeName>            List active Unity objects of a type
 dump <TypeName> <index>       Print all fields of an object
 get <TypeName> <index> <field>
@@ -45,7 +45,34 @@ fleet <index>                 Print fleet detail and per-ship data
 fleetrefuel <index|all> [ratio]
 fleetrepair <index|all> [ratio]
 fleetrecover <index|all>      Emergency recovery for stranded fleets
+market.dump                   Full market analysis – inventory, stockRatios, resupply rates
+market.stations               List all stations by index
+market.inject <res> <qty> [stationIdx]  Inject resources into market
+market.fix                    Reset broken stockRatios across all markets
 ```
+
+### Market Commands (v0.2.0)
+
+**`market.dump`** — Detailed dump of every station's market state including
+resupply rate, ideal stock ratio, storage capacity, and per-resource inventory
+with stock ratios. Resources with low stockRatio and high inventory are
+highlighted in red.
+
+**`market.stations`** — Quick reference list of station names and indices,
+for use with `market.inject`.
+
+**`market.inject <resource> <quantity> [stationIndex]`** — Inject resources
+into station inventories. Resource names are fuzzy-matched (e.g., "dt" matches
+"DT Fuel"). Without a station index, distributes evenly across all markets.
+
+```text
+market.inject "DT Fuel" 500 0    -- inject 500 DT into station 0
+market.inject volatiles 200      -- inject 200 volatiles into ALL stations
+```
+
+**`market.fix`** — Emergency command to reset broken stock ratios. Scans all
+markets and increases stockRatios for resources with significant inventory but
+near-zero ratios. This immediately allows trade to resume.
 
 ## Controls
 

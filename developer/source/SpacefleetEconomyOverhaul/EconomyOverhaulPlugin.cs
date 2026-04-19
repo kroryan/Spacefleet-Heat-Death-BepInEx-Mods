@@ -1,17 +1,19 @@
 using BepInEx;
 using BepInEx.Configuration;
+using BepInEx.Logging;
 using HarmonyLib;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using UnityEngine;
 
 namespace SpacefleetEconomyOverhaul
 {
-    [BepInPlugin("local.spacefleet.economy-overhaul", "Spacefleet Economy Overhaul", "0.1.0")]
+    [BepInPlugin("local.spacefleet.economy-overhaul", "Spacefleet Economy Overhaul", "0.3.0")]
     public sealed class EconomyOverhaulPlugin : BaseUnityPlugin
     {
+        internal static ManualLogSource Log;
+
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<float> MinPriceRatio;
         internal static ConfigEntry<float> MaxPriceRatio;
@@ -24,25 +26,50 @@ namespace SpacefleetEconomyOverhaul
         internal static ConfigEntry<float> MinimumTradeQuantity;
         internal static ConfigEntry<float> MinimumAutoTraderProfitMargin;
 
+        internal static ConfigEntry<float> MinResupplyRate;
+        internal static ConfigEntry<float> FuelResupplyMultiplier;
+        internal static ConfigEntry<float> StockRatioRecoveryRate;
+        internal static ConfigEntry<float> StockRatioRecoveryThreshold;
+        internal static ConfigEntry<float> SurplusDumpRatio;
+
         private Harmony harmony;
 
         private void Awake()
         {
+            Log = Logger;
             Enabled = Config.Bind("General", "Enabled", true, "Enable economy price balancing.");
+
             MinPriceRatio = Config.Bind("Prices", "MinPriceRatio", 0.35f, "Lowest allowed price as a fraction of resource base price.");
             MaxPriceRatio = Config.Bind("Prices", "MaxPriceRatio", 4.0f, "Highest allowed price as a multiple of resource base price.");
             ScarcityPremium = Config.Bind("Prices", "ScarcityPremium", 0.35f, "Extra price pressure when a market is below ideal stock.");
             AbundanceDiscount = Config.Bind("Prices", "AbundanceDiscount", 0.20f, "Discount pressure when a market is above ideal stock.");
+
             GlobalDemandWeight = Config.Bind("GlobalMarket", "GlobalDemandWeight", 0.25f, "How strongly global demand/supply affects local prices.");
             GlobalDemandMinMultiplier = Config.Bind("GlobalMarket", "GlobalDemandMinMultiplier", 0.80f, "Minimum global demand multiplier.");
             GlobalDemandMaxMultiplier = Config.Bind("GlobalMarket", "GlobalDemandMaxMultiplier", 1.25f, "Maximum global demand multiplier.");
-            MinimumTradeQuantity = Config.Bind("Trade", "MinimumTradeQuantity", 1.0f, "Reject smaller market trades to avoid dust trades and trader accounting edge cases.");
-            MinimumAutoTraderProfitMargin = Config.Bind("Trade", "MinimumAutoTraderProfitMargin", 0.05f, "Lowest profit margin auto-traders are allowed to relax to.");
-            PriceCacheSeconds = Config.Bind("Performance", "PriceCacheSeconds", 2.0f, "Seconds to cache expensive economy multipliers.");
+
+            MinimumTradeQuantity = Config.Bind("Trade", "MinimumTradeQuantity", 0.5f,
+                "Reject market trades smaller than this to avoid dust trades.");
+            MinimumAutoTraderProfitMargin = Config.Bind("Trade", "MinimumAutoTraderProfitMargin", 0.05f,
+                "Lowest profit margin auto-traders are allowed to relax to.");
+
+            MinResupplyRate = Config.Bind("TradeFlow", "MinResupplyRate", 2.0f,
+                "Minimum resupplyRatePerHour enforced on all markets. Vanilla can be 0, which blocks ALL trade.");
+            FuelResupplyMultiplier = Config.Bind("TradeFlow", "FuelResupplyMultiplier", 10.0f,
+                "Multiplier for fuel trade rate (vanilla is 10x). Increase to let more fuel flow per hour.");
+            StockRatioRecoveryRate = Config.Bind("TradeFlow", "StockRatioRecoveryRate", 0.5f,
+                "How fast stockRatios recover per production cycle for outputs with surplus.");
+            StockRatioRecoveryThreshold = Config.Bind("TradeFlow", "StockRatioRecoveryThreshold", 0.5f,
+                "If inventory fill ratio exceeds this, stock ratio recovery kicks in.");
+            SurplusDumpRatio = Config.Bind("TradeFlow", "SurplusDumpRatio", 5.0f,
+                "Target minimum stockRatio for surplus outputs.");
+
+            PriceCacheSeconds = Config.Bind("Performance", "PriceCacheSeconds", 2.0f,
+                "Seconds to cache global demand multipliers.");
 
             harmony = new Harmony("local.spacefleet.economy-overhaul");
             harmony.PatchAll();
-            Logger.LogInfo("Spacefleet Economy Overhaul loaded. Price balancing is cached and configurable in BepInEx/config/local.spacefleet.economy-overhaul.cfg.");
+            Logger.LogInfo("Economy Overhaul v0.3.0 loaded – typed access, fuel flow fix, stock ratio recovery.");
         }
 
         private void OnDestroy()
@@ -51,67 +78,94 @@ namespace SpacefleetEconomyOverhaul
         }
     }
 
-    [HarmonyPatch]
+    // =========================================================================
+    // PATCH 1: Fix resupplyRatePerHour once at Market.Start
+    // =========================================================================
+    // Vanilla Market.resupplyRatePerHour is set on the prefab. Some stations
+    // have it at 0, which blocks ALL trade (buy AND sell via ExecuteTrade).
+    // We fix it here once so all vanilla code benefits without per-call cost.
+    // =========================================================================
+    [HarmonyPatch(typeof(Market), "Start")]
+    internal static class MarketStartPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(Market __instance)
+        {
+            if (!EconomyOverhaulPlugin.Enabled.Value) return;
+
+            float min = EconomyOverhaulPlugin.MinResupplyRate.Value;
+            if (__instance.resupplyRatePerHour < min)
+            {
+                EconomyOverhaulPlugin.Log.LogInfo(
+                    "Fixed resupplyRate " + __instance.resupplyRatePerHour.ToString("F1") +
+                    " -> " + min.ToString("F1") + " on " + __instance.name);
+                __instance.resupplyRatePerHour = min;
+            }
+        }
+    }
+
+    // =========================================================================
+    // PATCH 2: GetCurrentPrice – price balancing with direct typed access
+    // =========================================================================
+    // v0.2.0 used reflection for every field/method access (8+ calls per price
+    // query). With Assembly-CSharp reference, we use direct typed access.
+    // GetCurrentPrice is called 448+ times per game hour by UpdateAveragePrices.
+    // =========================================================================
+    [HarmonyPatch(typeof(Market), "GetCurrentPrice")]
     internal static class MarketGetCurrentPricePatch
     {
-        private static readonly Dictionary<CacheKey, CachedFloat> localMultiplierCache = new Dictionary<CacheKey, CachedFloat>();
-        private static readonly Dictionary<int, CachedFloat> globalMultiplierCache = new Dictionary<int, CachedFloat>();
-        private static readonly Dictionary<string, FieldInfo> fieldCache = new Dictionary<string, FieldInfo>();
-        private static readonly Dictionary<string, MethodInfo> methodCache = new Dictionary<string, MethodInfo>();
+        private static readonly Dictionary<ResourceDefinition, CachedFloat> globalCache =
+            new Dictionary<ResourceDefinition, CachedFloat>();
 
-        private static Type globalMarketType;
-        private static FieldInfo globalCurrentField;
-        private static PropertyInfo globalCurrentProperty;
-        private static object cachedGlobalMarket;
-        private static float nextGlobalMarketLookupTime;
-
-        private static MethodBase TargetMethod()
-        {
-            return AccessTools.Method(AccessTools.TypeByName("Market"), "GetCurrentPrice");
-        }
+        // Direct field ref for private stockRatios (delegate, no per-call reflection)
+        private static readonly AccessTools.FieldRef<Market, List<ResourceQuantity>> stockRatiosRef =
+            AccessTools.FieldRefAccess<Market, List<ResourceQuantity>>("stockRatios");
 
         [HarmonyPostfix]
-        private static void Postfix(object __instance, object[] __args, ref int __result)
+        private static void Postfix(Market __instance, ResourceDefinition resource, bool isBuying, ref int __result)
         {
-            if (!EconomyOverhaulPlugin.Enabled.Value || __instance == null || __args == null || __args.Length < 1)
-            {
+            if (!EconomyOverhaulPlugin.Enabled.Value || resource == null || __result <= 0 || resource.basePrice <= 0)
                 return;
-            }
-
-            object resource = __args[0];
-            if (resource == null || __result <= 0)
-            {
-                return;
-            }
-
-            int basePrice = GetIntField(resource, "basePrice", 0);
-            if (basePrice <= 0)
-            {
-                return;
-            }
 
             float price = __result;
             price *= GetLocalStockMultiplier(__instance, resource);
             price *= GetGlobalDemandMultiplier(resource);
 
-            float min = Mathf.Max(1f, basePrice * EconomyOverhaulPlugin.MinPriceRatio.Value);
-            float max = Mathf.Max(min, basePrice * EconomyOverhaulPlugin.MaxPriceRatio.Value);
+            float min = Mathf.Max(1f, resource.basePrice * EconomyOverhaulPlugin.MinPriceRatio.Value);
+            float max = Mathf.Max(min, resource.basePrice * EconomyOverhaulPlugin.MaxPriceRatio.Value);
             __result = Mathf.RoundToInt(Mathf.Clamp(price, min, max));
         }
 
-        private static float GetLocalStockMultiplier(object market, object resource)
+        private static float GetLocalStockMultiplier(Market market, ResourceDefinition resource)
         {
-            CacheKey key = new CacheKey(market, resource);
-            float now = Time.unscaledTime;
-            if (localMultiplierCache.TryGetValue(key, out CachedFloat cached) && cached.ExpiresAt > now)
+            float idealStockRatio = Mathf.Max(0.01f, market.idealStockRatio);
+
+            // Read stockRatio from private field (quantity * 0.01 is vanilla scaling)
+            float stockRatio = 0f;
+            List<ResourceQuantity> ratios = stockRatiosRef(market);
+            if (ratios != null)
             {
-                return cached.Value;
+                for (int i = 0; i < ratios.Count; i++)
+                {
+                    if (ratios[i].resource == resource)
+                    {
+                        stockRatio = ratios[i].quantity * 0.01f;
+                        break;
+                    }
+                }
             }
 
-            float idealStockRatio = Mathf.Max(0.01f, GetFloatField(market, "idealStockRatio", 0.5f));
-            float stockRatio = InvokeFloat(market, "GetStockRatio", idealStockRatio, resource);
-            float multiplier = 1f;
+            // FIX: When stockRatio ~0 (driven there by Factory.AddResourcesDelayed),
+            // use actual inventory fill ratio instead of the broken zero
+            if (stockRatio < 0.01f && market.inventory != null)
+            {
+                float qty = market.inventory.GetQuantityOf(resource);
+                float storageMax = market.inventory.storageMax;
+                if (storageMax > 0f)
+                    stockRatio = Mathf.Clamp(qty / storageMax, 0f, 1f);
+            }
 
+            float multiplier = 1f;
             if (stockRatio < idealStockRatio)
             {
                 float scarcity = Mathf.Clamp01((idealStockRatio - stockRatio) / idealStockRatio);
@@ -123,277 +177,244 @@ namespace SpacefleetEconomyOverhaul
                 multiplier -= abundance * EconomyOverhaulPlugin.AbundanceDiscount.Value;
             }
 
-            multiplier = Mathf.Clamp(multiplier, 0.5f, 1.75f);
-            localMultiplierCache[key] = new CachedFloat(multiplier, now + GetCacheSeconds());
-            return multiplier;
+            return Mathf.Clamp(multiplier, 0.5f, 1.75f);
         }
 
-        private static float GetGlobalDemandMultiplier(object resource)
+        private static float GetGlobalDemandMultiplier(ResourceDefinition resource)
         {
-            int resourceId = RuntimeHelpers.GetHashCode(resource);
             float now = Time.unscaledTime;
-            if (globalMultiplierCache.TryGetValue(resourceId, out CachedFloat cached) && cached.ExpiresAt > now)
-            {
+            if (globalCache.TryGetValue(resource, out CachedFloat cached) && cached.ExpiresAt > now)
                 return cached.Value;
-            }
 
-            object globalMarket = FindCurrent("GlobalMarket");
-            if (globalMarket == null)
-            {
-                return 1f;
-            }
+            GlobalMarket gm = GlobalMarket.current;
+            if (gm == null) return 1f;
 
-            float supply = Mathf.Max(0.01f, InvokeFloat(globalMarket, "GetSupplyOf", 1f, resource));
-            float demand = Mathf.Max(0.01f, InvokeFloat(globalMarket, "GetDemandOf", 1f, resource));
+            float supply = Mathf.Max(0.01f, gm.GetSupplyOf(resource));
+            float demand = Mathf.Max(0.01f, gm.GetDemandOf(resource));
             float ratio = Mathf.Clamp(demand / supply, 0.1f, 10f);
             float multiplier = Mathf.Pow(ratio, EconomyOverhaulPlugin.GlobalDemandWeight.Value);
-            multiplier = Mathf.Clamp(multiplier, EconomyOverhaulPlugin.GlobalDemandMinMultiplier.Value, EconomyOverhaulPlugin.GlobalDemandMaxMultiplier.Value);
-            globalMultiplierCache[resourceId] = new CachedFloat(multiplier, now + GetCacheSeconds());
+            multiplier = Mathf.Clamp(multiplier,
+                EconomyOverhaulPlugin.GlobalDemandMinMultiplier.Value,
+                EconomyOverhaulPlugin.GlobalDemandMaxMultiplier.Value);
+
+            float cacheTime = Mathf.Max(0.25f, EconomyOverhaulPlugin.PriceCacheSeconds.Value);
+            globalCache[resource] = new CachedFloat(multiplier, now + cacheTime);
             return multiplier;
-        }
-
-        private static object FindCurrent(string typeName)
-        {
-            float now = Time.unscaledTime;
-            if (cachedGlobalMarket != null && nextGlobalMarketLookupTime > now)
-            {
-                return cachedGlobalMarket;
-            }
-
-            if (globalMarketType == null)
-            {
-                globalMarketType = AccessTools.TypeByName(typeName);
-                if (globalMarketType == null)
-                {
-                    return null;
-                }
-
-                globalCurrentField = globalMarketType.GetField("current", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                globalCurrentProperty = globalMarketType.GetProperty("current", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-            }
-
-            object current = globalCurrentField?.GetValue(null);
-            if (current != null)
-            {
-                cachedGlobalMarket = current;
-                nextGlobalMarketLookupTime = now + GetCacheSeconds();
-                return current;
-            }
-
-            current = globalCurrentProperty?.GetValue(null, null);
-            cachedGlobalMarket = current ?? UnityEngine.Object.FindObjectOfType(globalMarketType);
-            nextGlobalMarketLookupTime = now + GetCacheSeconds();
-            return cachedGlobalMarket;
-        }
-
-        private static int GetIntField(object target, string fieldName, int fallback)
-        {
-            object value = GetField(target, fieldName);
-            return value is int intValue ? intValue : fallback;
-        }
-
-        private static float GetFloatField(object target, string fieldName, float fallback)
-        {
-            object value = GetField(target, fieldName);
-            return value is float floatValue ? floatValue : fallback;
-        }
-
-        private static object GetField(object target, string fieldName)
-        {
-            if (target == null)
-            {
-                return null;
-            }
-
-            Type type = target.GetType();
-            string key = type.FullName + "." + fieldName;
-            if (!fieldCache.TryGetValue(key, out FieldInfo field))
-            {
-                field = type.GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-                fieldCache[key] = field;
-            }
-
-            return field?.GetValue(target);
-        }
-
-        private static float InvokeFloat(object target, string methodName, float fallback, params object[] args)
-        {
-            if (target == null)
-            {
-                return fallback;
-            }
-
-            try
-            {
-                Type type = target.GetType();
-                string key = type.FullName + "." + methodName;
-                if (!methodCache.TryGetValue(key, out MethodInfo method))
-                {
-                    method = type.GetMethod(methodName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    methodCache[key] = method;
-                }
-
-                object value = method?.Invoke(target, args);
-                return value is float floatValue ? floatValue : fallback;
-            }
-            catch
-            {
-                return fallback;
-            }
-        }
-
-        private static float GetCacheSeconds()
-        {
-            return Mathf.Max(0.25f, EconomyOverhaulPlugin.PriceCacheSeconds.Value);
-        }
-
-        private struct CacheKey : IEquatable<CacheKey>
-        {
-            private readonly int marketId;
-            private readonly int resourceId;
-
-            public CacheKey(object market, object resource)
-            {
-                marketId = RuntimeHelpers.GetHashCode(market);
-                resourceId = RuntimeHelpers.GetHashCode(resource);
-            }
-
-            public bool Equals(CacheKey other)
-            {
-                return marketId == other.marketId && resourceId == other.resourceId;
-            }
-
-            public override bool Equals(object obj)
-            {
-                return obj is CacheKey other && Equals(other);
-            }
-
-            public override int GetHashCode()
-            {
-                unchecked
-                {
-                    return (marketId * 397) ^ resourceId;
-                }
-            }
         }
 
         private struct CachedFloat
         {
             public readonly float Value;
             public readonly float ExpiresAt;
-
-            public CachedFloat(float value, float expiresAt)
-            {
-                Value = value;
-                ExpiresAt = expiresAt;
-            }
+            public CachedFloat(float value, float expiresAt) { Value = value; ExpiresAt = expiresAt; }
         }
     }
 
-    [HarmonyPatch]
+    // =========================================================================
+    // PATCH 3: CanBuy – enforce MinimumTradeQuantity + resupply rate fallback
+    // =========================================================================
+    // Market.Start should have fixed resupplyRatePerHour, but we also handle
+    // edge cases. Lightweight POSTFIX — zero reflection, no method replacement.
+    // =========================================================================
+    [HarmonyPatch(typeof(Market), "CanBuy")]
     internal static class MarketCanBuyPatch
     {
-        private static MethodBase TargetMethod()
-        {
-            return AccessTools.Method(AccessTools.TypeByName("Market"), "CanBuy");
-        }
-
         [HarmonyPostfix]
-        private static void Postfix(ref float __result)
+        private static void Postfix(Market __instance, ResourceDefinition resource, float quantity, int factionCredits, ref float __result)
         {
-            if (!EconomyOverhaulPlugin.Enabled.Value || __result <= 0f)
+            if (!EconomyOverhaulPlugin.Enabled.Value) return;
+
+            // If vanilla returned 0, check if resupply rate was the bottleneck
+            if (__result <= 0f && resource != null && quantity > 0f && factionCredits > 0)
             {
-                return;
+                float available = __instance.GetQuantityAvailable(resource);
+                float quantityOf = __instance.GetQuantityOf(resource);
+
+                if (available > 0.5f && quantityOf > 0.5f)
+                {
+                    bool isFuel = resource.type == ResourceType.VOLATILES ||
+                                  resource.type == ResourceType.DT_FUEL ||
+                                  resource.type == ResourceType.DH_FUEL;
+
+                    float minEffectiveRate = EconomyOverhaulPlugin.MinResupplyRate.Value *
+                        (isFuel ? EconomyOverhaulPlugin.FuelResupplyMultiplier.Value : 1f);
+
+                    float currentEffectiveRate = __instance.resupplyRatePerHour *
+                        (isFuel ? 10f : 1f);
+
+                    if (currentEffectiveRate < minEffectiveRate)
+                    {
+                        int price = Mathf.Max(1, __instance.GetCurrentPrice(resource, true));
+                        float affordable = Mathf.Floor((float)factionCredits / (float)price);
+
+                        if (affordable > 0f)
+                        {
+                            __result = Mathf.Floor(Mathf.Min(quantity, available, quantityOf, affordable, minEffectiveRate));
+                        }
+                    }
+                }
             }
 
-            float minimum = Mathf.Max(0f, EconomyOverhaulPlugin.MinimumTradeQuantity.Value);
-            if (minimum > 0f && __result < minimum)
-            {
+            // Enforce MinimumTradeQuantity
+            float minTrade = EconomyOverhaulPlugin.MinimumTradeQuantity.Value;
+            if (minTrade > 0f && __result > 0f && __result < minTrade)
                 __result = 0f;
+        }
+    }
+
+    // =========================================================================
+    // PATCH 4: Stock Ratio Recovery on Factory.ProductionCycle
+    // =========================================================================
+    // Factory.AddResourcesDelayed drives stockRatios for outputs to 0 on init.
+    // Once at 0, they never recover. This runs after each daily production cycle
+    // and gradually increases stockRatios for overproduced resources.
+    // =========================================================================
+    [HarmonyPatch(typeof(Factory), "ProductionCycle")]
+    internal static class StockRatioRecoveryPatch
+    {
+        private static readonly AccessTools.FieldRef<Market, List<ResourceQuantity>> stockRatiosRef =
+            AccessTools.FieldRefAccess<Market, List<ResourceQuantity>>("stockRatios");
+
+        [HarmonyPostfix]
+        private static void Postfix(Factory __instance)
+        {
+            if (!EconomyOverhaulPlugin.Enabled.Value || __instance == null) return;
+
+            try
+            {
+                RecoverStockRatios(__instance);
+            }
+            catch (Exception ex)
+            {
+                EconomyOverhaulPlugin.Log.LogWarning("StockRatioRecovery error: " + ex.Message);
+            }
+        }
+
+        private static void RecoverStockRatios(Factory factory)
+        {
+            Market market = factory.GetComponent<Market>();
+            if (market == null || market.inventory == null) return;
+
+            float storageMax = market.inventory.storageMax;
+            if (storageMax <= 0f) return;
+
+            float threshold = EconomyOverhaulPlugin.StockRatioRecoveryThreshold.Value;
+            float recoveryRate = EconomyOverhaulPlugin.StockRatioRecoveryRate.Value;
+            float targetRatio = EconomyOverhaulPlugin.SurplusDumpRatio.Value;
+
+            // Collect output resources from factory recipes
+            HashSet<ResourceDefinition> outputResources = new HashSet<ResourceDefinition>();
+            List<RecipeCapacity> recipes = factory.recipes;
+            if (recipes == null) return;
+
+            for (int i = 0; i < recipes.Count; i++)
+            {
+                ProductionRecipe recipe = recipes[i].Recipe;
+                if (recipe == null) continue;
+
+                List<ResourceQuantity> outputs = recipe.Outputs;
+                if (outputs == null) continue;
+
+                for (int j = 0; j < outputs.Count; j++)
+                {
+                    if (outputs[j].resource != null)
+                        outputResources.Add(outputs[j].resource);
+                }
+            }
+
+            if (outputResources.Count == 0) return;
+
+            List<ResourceQuantity> stockRatios = stockRatiosRef(market);
+            if (stockRatios == null) return;
+
+            for (int i = 0; i < stockRatios.Count; i++)
+            {
+                ResourceQuantity rq = stockRatios[i];
+                if (rq.resource == null || !outputResources.Contains(rq.resource)) continue;
+
+                // Raw quantity stores stockRatio * 100 (GetStockRatio returns quantity * 0.01)
+                float currentStockRatio = rq.quantity * 0.01f;
+                if (currentStockRatio >= targetRatio) continue;
+
+                float qty = market.inventory.GetQuantityOf(rq.resource);
+                float fillRatio = qty / storageMax;
+
+                if (fillRatio > threshold)
+                {
+                    float newStockRatio = Mathf.Min(currentStockRatio + recoveryRate, targetRatio);
+                    rq.quantity = newStockRatio * 100f;
+                }
             }
         }
     }
 
+    // =========================================================================
+    // PATCH 5: GetBestSellerFromList – relax price ceiling when no sellers found
+    // =========================================================================
+    [HarmonyPatch(typeof(GlobalMarket), "GetBestSellerFromList")]
+    internal static class GlobalMarketSellerPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(ref Market __result, ResourceDefinition resource, List<Market> marketsToCheck)
+        {
+            if (!EconomyOverhaulPlugin.Enabled.Value || __result != null) return;
+
+            // Original returned null — no seller found below average price.
+            // Retry without the price ceiling to break deadlocks.
+            int bestPrice = int.MaxValue;
+            List<Market> candidates = new List<Market>();
+
+            for (int i = 0; i < marketsToCheck.Count; i++)
+            {
+                Market m = marketsToCheck[i];
+                if (m.CanBuy(resource, 1f, 1000000) <= 0f) continue;
+                if (!m.HasResource(resource)) continue;
+
+                int price = m.GetCurrentPrice(resource, true);
+                if (price < bestPrice)
+                {
+                    bestPrice = price;
+                    candidates.Clear();
+                    candidates.Add(m);
+                }
+                else if (price == bestPrice)
+                {
+                    candidates.Add(m);
+                }
+            }
+
+            if (candidates.Count > 0)
+            {
+                __result = candidates[UnityEngine.Random.Range(0, candidates.Count)];
+            }
+        }
+    }
+
+    // =========================================================================
+    // PATCH 6: Trader profit margin floor
+    // =========================================================================
     [HarmonyPatch]
     internal static class TraderMarginPatch
     {
-        private static readonly Dictionary<string, FieldInfo> fieldCache = new Dictionary<string, FieldInfo>();
-
         private static IEnumerable<MethodBase> TargetMethods()
         {
-            Type traderType = AccessTools.TypeByName("Trader");
-            if (traderType == null)
-            {
-                yield break;
-            }
+            MethodInfo tradeCycle = AccessTools.Method(typeof(Trader), "TradeCycle");
+            if (tradeCycle != null) yield return tradeCycle;
 
-            MethodInfo tradeCycle = AccessTools.Method(traderType, "TradeCycle");
-            if (tradeCycle != null)
-            {
-                yield return tradeCycle;
-            }
-
-            MethodInfo trade = AccessTools.Method(traderType, "Trade");
-            if (trade != null)
-            {
-                yield return trade;
-            }
+            MethodInfo trade = AccessTools.Method(typeof(Trader), "Trade");
+            if (trade != null) yield return trade;
         }
 
         [HarmonyPostfix]
-        private static void Postfix(object __instance)
+        private static void Postfix(Trader __instance)
         {
-            if (!EconomyOverhaulPlugin.Enabled.Value || __instance == null)
-            {
-                return;
-            }
+            if (!EconomyOverhaulPlugin.Enabled.Value || __instance == null) return;
 
             float minimum = Mathf.Max(0f, EconomyOverhaulPlugin.MinimumAutoTraderProfitMargin.Value);
-            float current = GetFloatField(__instance, "currentMinProfitMargin", minimum);
-            if (current >= 0f && current < minimum)
+            if (__instance.currentMinProfitMargin >= 0f && __instance.currentMinProfitMargin < minimum)
             {
-                SetField(__instance, "currentMinProfitMargin", minimum);
+                __instance.currentMinProfitMargin = minimum;
             }
-        }
-
-        private static float GetFloatField(object target, string fieldName, float fallback)
-        {
-            object value = GetField(target, fieldName);
-            return value is float floatValue ? floatValue : fallback;
-        }
-
-        private static object GetField(object target, string fieldName)
-        {
-            if (target == null)
-            {
-                return null;
-            }
-
-            FieldInfo field = GetFieldInfo(target.GetType(), fieldName);
-            return field?.GetValue(target);
-        }
-
-        private static void SetField(object target, string fieldName, object value)
-        {
-            if (target == null)
-            {
-                return;
-            }
-
-            FieldInfo field = GetFieldInfo(target.GetType(), fieldName);
-            field?.SetValue(target, value);
-        }
-
-        private static FieldInfo GetFieldInfo(Type type, string fieldName)
-        {
-            string key = type.FullName + "." + fieldName;
-            if (!fieldCache.TryGetValue(key, out FieldInfo field))
-            {
-                field = type.GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-                fieldCache[key] = field;
-            }
-
-            return field;
         }
     }
 }

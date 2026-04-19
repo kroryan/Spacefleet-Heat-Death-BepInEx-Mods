@@ -320,6 +320,19 @@ namespace SpacefleetConsole
                     Require(parts, 2, "fleetrecover <index|all>");
                     RecoverFleetCommand(parts[1]);
                     break;
+                case "market.dump":
+                    MarketDump();
+                    break;
+                case "market.stations":
+                    MarketStations();
+                    break;
+                case "market.inject":
+                    Require(parts, 3, "market.inject <resource> <quantity> [stationIndex]");
+                    MarketInject(parts);
+                    break;
+                case "market.fix":
+                    MarketFix();
+                    break;
                 default:
                     AddLine("Unknown command. Type: help");
                     break;
@@ -333,12 +346,37 @@ namespace SpacefleetConsole
             AddLine("Economy: economy");
             AddLine("Dev objects: objects <TypeName>, dump <TypeName> <index>, get <TypeName> <index> <field>, set <TypeName> <index> <field> <value>, invoke <TypeName> <index> <method>");
             AddLine("Fleet recovery: fleets, fleet <index>, fleetrefuel <index|all> [ratio], fleetrepair <index|all> [ratio], fleetrecover <index|all>");
+            AddLine("Market: market.dump, market.stations, market.inject <resource> <qty> [stationIdx], market.fix");
             AddLine("Press Enter to run commands. Use Up/Down for command history.");
         }
 
         private static string[] SplitCommand(string value)
         {
-            return value.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var parts = new List<string>();
+            bool inQuotes = false;
+            var current = new System.Text.StringBuilder();
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                if (c == '"')
+                {
+                    inQuotes = !inQuotes;
+                    continue;
+                }
+                if (c == ' ' && !inQuotes)
+                {
+                    if (current.Length > 0)
+                    {
+                        parts.Add(current.ToString());
+                        current.Clear();
+                    }
+                    continue;
+                }
+                current.Append(c);
+            }
+            if (current.Length > 0)
+                parts.Add(current.ToString());
+            return parts.ToArray();
         }
 
         private void MoveHistory(int delta)
@@ -797,9 +835,288 @@ namespace SpacefleetConsole
             }
 
             ICollection markets = GetField(gm, "allMarkets") as ICollection;
-            ICollection buyPrices = GetField(gm, "buyPrices") as ICollection;
-            ICollection sellPrices = GetField(gm, "sellPrices") as ICollection;
-            return "Economy: markets=" + (markets?.Count ?? 0) + " buyPrices=" + (buyPrices?.Count ?? 0) + " sellPrices=" + (sellPrices?.Count ?? 0);
+            IList supplys = GetField(gm, "supplys") as IList;
+            IList demands = GetField(gm, "demands") as IList;
+
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            sb.AppendLine("Economy: " + (markets?.Count ?? 0) + " markets");
+
+            if (supplys != null && demands != null)
+            {
+                for (int i = 0; i < supplys.Count && i < demands.Count; i++)
+                {
+                    object sRq = supplys[i];
+                    object dRq = demands[i];
+                    object sRes = GetField(sRq, "resource");
+                    string name = GetField(sRes, "resourceName") as string ?? "?";
+                    float sup = GetField(sRq, "quantity") is float s ? s : 0f;
+                    float dem = GetField(dRq, "quantity") is float d ? d : 0f;
+                    float diff = sup - dem;
+                    string color = diff > 10 ? "green" : (diff < -10 ? "red" : "yellow");
+                    sb.AppendLine(string.Format("  <color={0}>{1}</color>: supply={2:F0} demand={3:F0} surplus={4:F0}",
+                        color, name, sup, dem, diff));
+                }
+            }
+            return sb.ToString().TrimEnd();
+        }
+
+        // ==== Market Console Commands ====
+
+        private void MarketDump()
+        {
+            object gm = FindCurrent("GlobalMarket");
+            if (gm == null) { AddLine("GlobalMarket unavailable."); return; }
+
+            IList markets = GetField(gm, "allMarkets") as IList;
+            if (markets == null) { AddLine("No markets found."); return; }
+
+            AddLine("=== MARKET DUMP (" + markets.Count + " markets) ===");
+            for (int i = 0; i < markets.Count; i++)
+            {
+                object market = markets[i];
+                Component comp = market as Component;
+                string stationName = "?";
+                if (comp != null)
+                {
+                    Type smType = AccessType("StationManager");
+                    if (smType != null)
+                    {
+                        object sm = comp.GetComponent(smType);
+                        if (sm != null) stationName = GetField(sm, "publicName") as string ?? "?";
+                    }
+                    if (stationName == "?")
+                    {
+                        Type trackType = AccessType("Track");
+                        if (trackType != null)
+                        {
+                            object track = comp.GetComponent(trackType);
+                            if (track != null)
+                            {
+                                object faction = InvokeMethod(track, "GetFaction", null);
+                                stationName = "Faction " + (GetField(track, "factionID") ?? "?");
+                            }
+                        }
+                    }
+                }
+
+                float resupply = GetField(market, "resupplyRatePerHour") is float r ? r : -1f;
+                float ideal = GetField(market, "idealStockRatio") is float id ? id : -1f;
+                object inv = GetField(market, "inventory");
+                float storageMax = inv != null && GetField(inv, "storageMax") is float sm2 ? sm2 : 0f;
+                float storageUsed = inv != null && GetField(inv, "storageUsed") is float su ? su : 0f;
+
+                AddLine(string.Format("[{0}] {1} – resupply={2:F1} ideal={3:F2} storage={4:F0}/{5:F0}",
+                    i, stationName, resupply, ideal, storageUsed, storageMax));
+
+                IList stockRatios = GetField(market, "stockRatios") as IList;
+                if (stockRatios != null && inv != null)
+                {
+                    foreach (object rq in stockRatios)
+                    {
+                        object res = GetField(rq, "resource");
+                        string rName = GetField(res, "resourceName") as string ?? "?";
+                        float rawQty = GetField(rq, "quantity") is float q ? q : 0f;
+                        float ratio = rawQty * 0.01f; // GetStockRatio returns quantity * 0.01
+                        float qty = 0f;
+                        try
+                        {
+                            MethodInfo getQty = inv.GetType().GetMethod("GetQuantityOf",
+                                BindingFlags.Public | BindingFlags.Instance);
+                            if (getQty != null)
+                            {
+                                object val = getQty.Invoke(inv, new object[] { res });
+                                qty = val is float f ? f : 0f;
+                            }
+                        }
+                        catch { }
+
+                        if (qty > 0.5f || ratio > 0.05f)
+                        {
+                            string color = ratio < 0.1f && qty > 100f ? "red" : "white";
+                            AddLine(string.Format("    <color={0}>{1}</color>: qty={2:F0} ratio={3:F2}",
+                                color, rName, qty, ratio));
+                        }
+                    }
+                }
+            }
+        }
+
+        private void MarketStations()
+        {
+            object gm = FindCurrent("GlobalMarket");
+            if (gm == null) { AddLine("GlobalMarket unavailable."); return; }
+
+            IList markets = GetField(gm, "allMarkets") as IList;
+            if (markets == null) { AddLine("No markets."); return; }
+
+            AddLine("=== STATIONS ===");
+            for (int i = 0; i < markets.Count; i++)
+            {
+                object market = markets[i];
+                Component comp = market as Component;
+                string name = GetStationName(comp) ?? ("Market " + i);
+                AddLine(string.Format("  [{0}] {1}", i, name));
+            }
+        }
+
+        private void MarketInject(string[] parts)
+        {
+            object gm = FindCurrent("GlobalMarket");
+            if (gm == null) { AddLine("GlobalMarket unavailable."); return; }
+
+            string resourceName = parts[1];
+            float quantity = ParseFloat(parts[2]);
+            int stationIndex = parts.Length >= 4 ? ParseInt(parts[3]) : -1;
+
+            // Find the resource definition
+            object allResources = GetField(gm, "allResources");
+            if (allResources == null) { AddLine("AllResources unavailable."); return; }
+
+            IList resList = GetField(allResources, "resources") as IList;
+            if (resList == null) { AddLine("Resource list unavailable."); return; }
+
+            object targetResource = null;
+            string matchedName = null;
+            foreach (object rd in resList)
+            {
+                string rn = GetField(rd, "resourceName") as string;
+                if (rn != null && rn.Replace(" ", "").ToLowerInvariant().Contains(resourceName.ToLowerInvariant().Replace(" ", "")))
+                {
+                    targetResource = rd;
+                    matchedName = rn;
+                    break;
+                }
+            }
+            if (targetResource == null) { AddLine("Resource '" + resourceName + "' not found. Try: Metals, DT Fuel, DH Fuel, Volatiles, etc."); return; }
+
+            IList markets = GetField(gm, "allMarkets") as IList;
+            if (markets == null || markets.Count == 0) { AddLine("No markets."); return; }
+
+            if (stationIndex >= 0)
+            {
+                if (stationIndex >= markets.Count) { AddLine("Station index out of range (0-" + (markets.Count - 1) + ")."); return; }
+                InjectToStation(markets[stationIndex], targetResource, matchedName, quantity);
+            }
+            else
+            {
+                // Inject to ALL markets proportionally
+                float perStation = quantity / markets.Count;
+                int count = 0;
+                foreach (object market in markets)
+                {
+                    object inv = GetField(market, "inventory");
+                    if (inv == null) continue;
+                    try
+                    {
+                        MethodInfo addRes = inv.GetType().GetMethod("AddResource", BindingFlags.Public | BindingFlags.Instance);
+                        if (addRes != null)
+                        {
+                            addRes.Invoke(inv, new object[] { targetResource, perStation });
+                            count++;
+                        }
+                    }
+                    catch { }
+                }
+                AddLine(string.Format("Injected {0:F0} {1} across {2} stations ({3:F1} each).", quantity, matchedName, count, perStation));
+            }
+        }
+
+        private void InjectToStation(object market, object resource, string name, float quantity)
+        {
+            Component comp = market as Component;
+            string stationName = GetStationName(comp) ?? "Unknown";
+            object inv = GetField(market, "inventory");
+            if (inv == null) { AddLine("Station has no inventory."); return; }
+
+            try
+            {
+                MethodInfo addRes = inv.GetType().GetMethod("AddResource", BindingFlags.Public | BindingFlags.Instance);
+                if (addRes != null)
+                {
+                    object added = addRes.Invoke(inv, new object[] { resource, quantity });
+                    float addedF = added is float f ? f : 0f;
+                    AddLine(string.Format("Injected {0:F0} {1} into {2} (actually added: {3:F0}).", quantity, name, stationName, addedF));
+                }
+            }
+            catch (Exception ex) { AddLine("Error: " + ex.Message); }
+        }
+
+        private void MarketFix()
+        {
+            object gm = FindCurrent("GlobalMarket");
+            if (gm == null) { AddLine("GlobalMarket unavailable."); return; }
+
+            IList markets = GetField(gm, "allMarkets") as IList;
+            if (markets == null) { AddLine("No markets."); return; }
+
+            int fixedCount = 0;
+            foreach (object market in markets)
+            {
+                object inv = GetField(market, "inventory");
+                if (inv == null) continue;
+
+                float storageMax = GetField(inv, "storageMax") is float sm ? sm : 0f;
+                if (storageMax <= 0f) continue;
+
+                IList stockRatios = GetField(market, "stockRatios") as IList;
+                if (stockRatios == null) continue;
+
+                foreach (object rq in stockRatios)
+                {
+                    object res = GetField(rq, "resource");
+                    float currentRatio = GetField(rq, "quantity") is float q ? q : 0f;
+                    // Raw quantity stores stockRatio * 100 (GetStockRatio returns quantity * 0.01)
+                    float actualStockRatio = currentRatio * 0.01f;
+
+                    float qty = 0f;
+                    try
+                    {
+                        MethodInfo getQty = inv.GetType().GetMethod("GetQuantityOf", BindingFlags.Public | BindingFlags.Instance);
+                        if (getQty != null) qty = (float)getQty.Invoke(inv, new object[] { res });
+                    }
+                    catch { }
+
+                    float fillRatio = qty / storageMax;
+                    // If stockRatio is near zero and station has significant inventory, push ratio up
+                    if (actualStockRatio < 0.1f && fillRatio > 0.3f)
+                    {
+                        // Target stockRatio based on fill level (e.g., fill=0.8 → stockRatio=8.0 → raw=800)
+                        float newStockRatio = Mathf.Max(actualStockRatio, fillRatio * 10f);
+                        newStockRatio = Mathf.Min(newStockRatio, 10f);
+                        SetField(rq, "quantity", newStockRatio * 100f);
+                        fixedCount++;
+                    }
+                }
+            }
+            AddLine("Fixed " + fixedCount + " stock ratios across " + markets.Count + " markets.");
+            AddLine("Prices and trade flow should improve within 1-2 game hours.");
+        }
+
+        private static string GetStationName(Component comp)
+        {
+            if (comp == null) return null;
+            Type smType = AccessType("StationManager");
+            if (smType != null)
+            {
+                object sm = comp.GetComponent(smType);
+                if (sm != null)
+                {
+                    string name = GetField(sm, "publicName") as string;
+                    if (!string.IsNullOrEmpty(name)) return name;
+                }
+            }
+            return null;
+        }
+
+        private static object InvokeMethod(object target, string name, object[] args)
+        {
+            if (target == null) return null;
+            try
+            {
+                MethodInfo m = target.GetType().GetMethod(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                return m?.Invoke(target, args);
+            }
+            catch { return null; }
         }
 
         private static object GetField(object target, string name)
