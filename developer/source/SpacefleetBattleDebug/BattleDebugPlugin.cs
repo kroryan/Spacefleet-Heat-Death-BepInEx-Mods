@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace SpacefleetBattleDebug
 {
-    [BepInPlugin("local.spacefleet.battle-debug", "Spacefleet Battle Debug", "0.1.0")]
+    [BepInPlugin("local.spacefleet.battle-debug", "Spacefleet Battle Debug", "0.2.0")]
     public sealed class BattleDebugPlugin : BaseUnityPlugin
     {
         #region Constants
@@ -92,6 +92,7 @@ namespace SpacefleetBattleDebug
 
         private float nextRefresh;
         private bool isTactical;
+        private bool wasTactical;
         private string modeLabel = "";
         private string overviewText = "";
         private readonly List<ShipData> playerShips = new List<ShipData>();
@@ -753,14 +754,25 @@ namespace SpacefleetBattleDebug
             object cm = FindCurrent("CombatManager");
             if (cm != null)
             {
+                if (!wasTactical)
+                {
+                    feed.Clear();
+                    lastTarget.Clear();
+                }
                 isTactical = true;
                 RefreshTactical(cm);
             }
             else
             {
+                if (wasTactical)
+                {
+                    showFeed = false;
+                    lastTarget.Clear();
+                }
                 isTactical = false;
                 RefreshStrategic();
             }
+            wasTactical = isTactical;
         }
 
         private void RefreshTactical(object cm)
@@ -768,20 +780,23 @@ namespace SpacefleetBattleDebug
             bool over = ToBool(GetField(cm, "isCombatOver"));
             modeLabel = over ? "TACTICAL COMBAT [COMBAT OVER]" : "TACTICAL COMBAT";
 
+            if (over)
+                showFeed = false;
+
             IList pShips = GetField(cm, "playerShips") as IList;
             IList hShips = GetField(cm, "hostileShips") as IList;
 
             int pAlive = pShips != null ? pShips.Count : 0;
             int hAlive = hShips != null ? hShips.Count : 0;
 
-            int pDestroyed = GetChildCount(GetField(cm, "playerShipsDestroyed"));
-            int pDisint = GetChildCount(GetField(cm, "playerShipsDisintegrated"));
-            int hDestroyed = GetChildCount(GetField(cm, "hostileShipsDestroyed"));
-            int hDisint = GetChildCount(GetField(cm, "hostileShipsDisintegrated"));
-            int pUnscathed = GetChildCount(GetField(cm, "playerShipsUnscathed"));
-            int pDamaged = GetChildCount(GetField(cm, "playerShipsDamaged"));
-            int hUnscathed = GetChildCount(GetField(cm, "hostileShipsUnscathed"));
-            int hDamaged = GetChildCount(GetField(cm, "hostileShipsDamaged"));
+            int pDestroyed = GetShipChildCount(GetField(cm, "playerShipsDestroyed"));
+            int pDisint = GetShipChildCount(GetField(cm, "playerShipsDisintegrated"));
+            int hDestroyed = GetShipChildCount(GetField(cm, "hostileShipsDestroyed"));
+            int hDisint = GetShipChildCount(GetField(cm, "hostileShipsDisintegrated"));
+            int pUnscathed = GetShipChildCount(GetField(cm, "playerShipsUnscathed"));
+            int pDamaged = GetShipChildCount(GetField(cm, "playerShipsDamaged"));
+            int hUnscathed = GetShipChildCount(GetField(cm, "hostileShipsUnscathed"));
+            int hDamaged = GetShipChildCount(GetField(cm, "hostileShipsDamaged"));
 
             overviewText = C("Your Fleet: ", COL_HEAD) + C(pAlive + " alive", COL_OK)
                 + " (" + pUnscathed + " ok, " + pDamaged + " damaged)";
@@ -1115,9 +1130,22 @@ namespace SpacefleetBattleDebug
             catch { return fallback; }
         }
 
-        private static int GetChildCount(object obj)
+        private static int GetShipChildCount(object obj)
         {
-            if (obj is Transform t) return t.childCount;
+            if (obj is Transform t)
+            {
+                if (shipControllerType != null)
+                {
+                    int count = 0;
+                    for (int i = 0; i < t.childCount; i++)
+                    {
+                        if (t.GetChild(i).GetComponent(shipControllerType) != null)
+                            count++;
+                    }
+                    return count;
+                }
+                return t.childCount;
+            }
             return 0;
         }
 
