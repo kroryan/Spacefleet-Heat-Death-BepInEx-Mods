@@ -4,7 +4,7 @@
 fuel market deadlocks, adjusts prices based on real supply/demand, and ensures
 trade flow remains sustainable long-term.
 
-**Version**: 0.3.0
+**Version**: 0.4.0
 **GUID**: `local.spacefleet.economy-overhaul`
 **Hotkey**: None (background patches)
 
@@ -18,28 +18,37 @@ Patches `Market.GetCurrentPrice` (HarmonyPostfix) to apply:
 2. **Global supply/demand pressure**: Based on `GlobalMarket.GetSupplyOf/GetDemandOf`
 3. **Base-price clamps**: Prevents absurd prices (`MinPriceRatio` to `MaxPriceRatio`)
 
-### Fuel Market Fix (v0.2.0 → v0.3.0 rewrite)
+### Fuel Market Fix (v0.2.0 → v0.4.0)
 
 Fixes a critical vanilla bug where fuel stockpiles become untradeable.
 v0.3.0 rewrote all patches to use **typed access** via direct Assembly-CSharp
 reference, eliminating ~3,500 reflection calls per game hour.
+v0.4.0 found and fixed the root cause: inflated fuel `stockRatios` made
+`Market.GetMinStockQuantity` return values exceeding storage capacity, so
+`CanBuy` computed 0 available fuel everywhere → "NO AVAILABLE FUEL".
 
-4. **Resupply Rate Fix** (HarmonyPostfix on `Market.Start`):
+4. **Resupply Rate Fix + Fuel StockRatio Cap** (HarmonyPostfix on `Market.Start`):
    Vanilla can leave `resupplyRatePerHour = 0` on some station prefabs,
    causing `CanBuy` and `ExecuteTrade` to cap trade at `Floor(0) = 0`.
    This patch fixes it once at load by enforcing `MinResupplyRate` (default 2.0).
+   v0.4.0 also caps fuel `stockRatios` to `SurplusDumpRatio` on market init,
+   preventing the inflated-reserve deadlock.
 
-5. **CanBuy Safety Net** (HarmonyPostfix on `Market.CanBuy`):
-   If vanilla returned 0 but the station has stock and credits, checks if the
-   resupply rate was the bottleneck and recalculates. Also enforces
-   `MinimumTradeQuantity`. Changed from Prefix (v0.2.0) to Postfix (v0.3.0)
-   to avoid reimplementing vanilla logic.
+5. **CanBuy Fuel Override** (HarmonyPostfix on `Market.CanBuy`):
+   v0.4.0 completely rewrites fuel availability. For fuel resources, ignores
+   vanilla's broken `minStockQuantity` calculation (which uses inflated
+   `stockRatios`) and instead reserves only `FuelReserveMaxRatio` (default
+   10%) of current stock. This ensures fuel is always purchasable when a
+   station has stock. Non-fuel resources use the vanilla result with a
+   `MinimumTradeQuantity` floor.
 
-6. **Stock Ratio Recovery** (HarmonyPostfix on `Factory.ProductionCycle`):
+6. **Stock Ratio Recovery + Fuel Cap** (HarmonyPostfix on `Factory.ProductionCycle`):
    Vanilla `Factory.AddResourcesDelayed` drives stockRatios for outputs to 0
    during init (calls `ModifyDemand(output, -0.1)` up to 100 times). Once at
    0, they never recover. This patch gradually increases stockRatios for
    overproduced resources, pushing surplus onto the market.
+   v0.4.0 also caps fuel `stockRatios` and limits `targetRatio` to
+   `min(SurplusDumpRatio, 0.5)` to prevent re-inflation.
 
 7. **Seller Filter Relaxation** (HarmonyPostfix on `GlobalMarket.GetBestSellerFromList`):
    Vanilla only considers sellers priced at or below the average buy price.
@@ -86,7 +95,8 @@ MinResupplyRate = 2.0
 FuelResupplyMultiplier = 10.0
 StockRatioRecoveryRate = 0.5
 StockRatioRecoveryThreshold = 0.5
-SurplusDumpRatio = 5.0
+SurplusDumpRatio = 0.15
+FuelReserveMaxRatio = 0.10
 
 [Performance]
 PriceCacheSeconds = 2.0
@@ -100,7 +110,8 @@ PriceCacheSeconds = 2.0
 | FuelResupplyMultiplier | 10.0 | Trade rate multiplier for fuel types |
 | StockRatioRecoveryRate | 0.5 | How fast stockRatios recover per production cycle |
 | StockRatioRecoveryThreshold | 0.5 | Inventory fill ratio that triggers recovery |
-| SurplusDumpRatio | 5.0 | Target minimum stockRatio for surplus outputs |
+| SurplusDumpRatio | 0.15 | Max stockRatio for fuel; target for surplus recovery (was 5.0 in v0.3.0, auto-migrated) |
+| FuelReserveMaxRatio | 0.10 | Fraction of fuel stock reserved (not sold) per station |
 
 ## The Fuel Deadlock Problem (Why This Fix Exists)
 
@@ -117,6 +128,13 @@ while the global market shows nothing available. Root causes:
 3. `Market.CanBuy` caps trade to `Floor(resupplyRatePerHour * 10)`. If
    resupplyRate is 0 (possible on some station prefabs), Floor(0) = 0 and
    NO trade can occur.
+
+4. (v0.4.0) **The v0.3.0 SurplusDumpRatio=5.0 bug**: The stock ratio recovery
+   patch was driving fuel stockRatios UP to 5.0. Since
+   `GetMinStockQuantity = storageMax * stockRatio`, a stockRatio of 5.0 meant
+   the station "reserved" 500% of its storage — more than it could hold.
+   `CanBuy` then computed `available = inventory - minStock` as negative → 0.
+   Every station returned 0 available fuel → "NO AVAILABLE FUEL" everywhere.
 
 4. `GlobalMarket.GetBestSellerFromList` checks `CanBuy(res, 1, 1M) > 0` —
    if every station fails this check, zero sellers exist globally.
@@ -140,6 +158,29 @@ Now optimized via:
 
 The stock ratio recovery runs once per production cycle (daily), not per frame.
 
+## Changelog
+
+### v0.4.0 — Fuel Deadlock Fix
+- **Root cause fix**: `SurplusDumpRatio` default changed from 5.0 → 0.15
+  (auto-migrated from old configs)
+- **New `FuelReserveMaxRatio`** config (default 0.10): controls how much fuel
+  each station keeps in reserve
+- **`CanBuy` rewritten for fuel**: ignores vanilla's broken `minStockQuantity`;
+  uses simple reserve fraction instead
+- **Fuel stockRatio capping** in `Market.Start` and `Factory.ProductionCycle`
+- **`IsFuel()` helper**: detects VOLATILES, DT_FUEL, DH_FUEL resource types
+
+### v0.3.0 — Typed Access Rewrite
+- Eliminated all reflection from hot paths
+- Direct Assembly-CSharp reference for typed field access
+- `AccessTools.FieldRefAccess` for private fields
+
+### v0.2.0 — Fuel Market Patches
+- Initial fuel deadlock fixes (resupply rate, CanBuy, stock ratio recovery)
+
+### v0.1.0 — Price Balancing
+- `GetCurrentPrice` postfix with supply/demand adjustments
+
 ## What It Does NOT Modify
 
 ```text
@@ -147,7 +188,9 @@ inventories, credits, saves, traders, trade routes,
 production, consumption, resource lists
 ```
 
-Only the numeric value returned by `Market.GetCurrentPrice` is changed.
+Price adjustments are applied to `Market.GetCurrentPrice` return values.
+Fuel availability is adjusted in `Market.CanBuy` for fuel types only.
+Stock ratios are capped for fuel to prevent the deadlock.
 
 ## How It Works
 

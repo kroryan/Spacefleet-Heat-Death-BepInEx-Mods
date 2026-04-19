@@ -12,7 +12,7 @@ tools, battle debugger, and core game fixes.
 | **SpacefleetConsole** | In-game developer console with 20+ commands | `º` / `` ` `` |
 | **SpacefleetEconomyDebug** | Economy health monitor with resource/market/trader signals | `¡` |
 | **SpacefleetBattleDebug** | Real-time combat tracker with Harmony damage events + strategic fleet view | `+` |
-| **SpacefleetEconomyOverhaul** | Conservative market price balancing (background) | — |
+| **SpacefleetEconomyOverhaul** | Fuel deadlock fix + market price balancing (background) | — |
 | **SpacefleetCoreFixes** | Money sound limiter + fleet delta-v softlock recovery (background) | — |
 
 ## Quick Install
@@ -155,9 +155,11 @@ Unity Editor is not needed for code mods.
 ## Current Status
 
 All mods are functional on Spacefleet - Heat Death with BepInEx 5.4.23.5.
-The economy is the most sensitive area: `SpacefleetEconomyOverhaul` only adjusts
-`Market.GetCurrentPrice` return values with cached calculations. It does not
-modify saves, inventories, trade execution, or trader routes.
+The economy is the most sensitive area: `SpacefleetEconomyOverhaul` adjusts
+`Market.GetCurrentPrice` return values with cached calculations and fixes a
+critical fuel deadlock where inflated `stockRatios` caused every station to
+report "NO AVAILABLE FUEL". It does not modify saves, inventories, trade
+execution, or trader routes.
 # Spacefleet Mods & Docs
 
 This directory is the modpack and developer documentation area for Spacefleet -

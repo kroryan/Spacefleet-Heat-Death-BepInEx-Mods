@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace SpacefleetEconomyOverhaul
 {
-    [BepInPlugin("local.spacefleet.economy-overhaul", "Spacefleet Economy Overhaul", "0.3.0")]
+    [BepInPlugin("local.spacefleet.economy-overhaul", "Spacefleet Economy Overhaul", "0.4.0")]
     public sealed class EconomyOverhaulPlugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -31,8 +31,17 @@ namespace SpacefleetEconomyOverhaul
         internal static ConfigEntry<float> StockRatioRecoveryRate;
         internal static ConfigEntry<float> StockRatioRecoveryThreshold;
         internal static ConfigEntry<float> SurplusDumpRatio;
+        internal static ConfigEntry<float> FuelReserveMaxRatio;
 
         private Harmony harmony;
+
+        internal static bool IsFuel(ResourceDefinition resource)
+        {
+            return resource != null &&
+                (resource.type == ResourceType.VOLATILES ||
+                 resource.type == ResourceType.DT_FUEL ||
+                 resource.type == ResourceType.DH_FUEL);
+        }
 
         private void Awake()
         {
@@ -61,15 +70,25 @@ namespace SpacefleetEconomyOverhaul
                 "How fast stockRatios recover per production cycle for outputs with surplus.");
             StockRatioRecoveryThreshold = Config.Bind("TradeFlow", "StockRatioRecoveryThreshold", 0.5f,
                 "If inventory fill ratio exceeds this, stock ratio recovery kicks in.");
-            SurplusDumpRatio = Config.Bind("TradeFlow", "SurplusDumpRatio", 5.0f,
-                "Target minimum stockRatio for surplus outputs.");
+            SurplusDumpRatio = Config.Bind("TradeFlow", "SurplusDumpRatio", 0.15f,
+                "Target stockRatio for surplus outputs (fraction of storageMax). v0.3.0 had 5.0 which was a bug.");
+            FuelReserveMaxRatio = Config.Bind("TradeFlow", "FuelReserveMaxRatio", 0.10f,
+                "Max fraction of fuel inventory a station can reserve. Rest is always available for sale.");
+
+            // v0.3.0 -> v0.4.0 migration: fix the broken SurplusDumpRatio
+            if (SurplusDumpRatio.Value > 1.0f)
+            {
+                Log.LogWarning("SurplusDumpRatio was " + SurplusDumpRatio.Value.ToString("F2") +
+                    " (v0.3.0 bug: caused stations to hoard all fuel). Resetting to 0.15.");
+                SurplusDumpRatio.Value = 0.15f;
+            }
 
             PriceCacheSeconds = Config.Bind("Performance", "PriceCacheSeconds", 2.0f,
                 "Seconds to cache global demand multipliers.");
 
             harmony = new Harmony("local.spacefleet.economy-overhaul");
             harmony.PatchAll();
-            Logger.LogInfo("Economy Overhaul v0.3.0 loaded – typed access, fuel flow fix, stock ratio recovery.");
+            Logger.LogInfo("Economy Overhaul v0.4.0 loaded – fuel drought fix, stock ratio bugfix.");
         }
 
         private void OnDestroy()
@@ -79,20 +98,26 @@ namespace SpacefleetEconomyOverhaul
     }
 
     // =========================================================================
-    // PATCH 1: Fix resupplyRatePerHour once at Market.Start
+    // PATCH 1: Fix resupplyRatePerHour AND fuel stockRatios at Market.Start
     // =========================================================================
-    // Vanilla Market.resupplyRatePerHour is set on the prefab. Some stations
-    // have it at 0, which blocks ALL trade (buy AND sell via ExecuteTrade).
-    // We fix it here once so all vanilla code benefits without per-call cost.
+    // Two problems fixed at startup:
+    // 1. resupplyRatePerHour = 0 blocks ALL trade on some station prefabs
+    // 2. Fuel stockRatios can be absurdly high, causing minStockQuantity to
+    //    exceed actual inventory → GetQuantityAvailable returns 0 → CanBuy
+    //    returns 0 → "NO AVAILABLE FUEL" for every fleet trying to refuel
     // =========================================================================
     [HarmonyPatch(typeof(Market), "Start")]
     internal static class MarketStartPatch
     {
+        private static readonly AccessTools.FieldRef<Market, List<ResourceQuantity>> stockRatiosRef =
+            AccessTools.FieldRefAccess<Market, List<ResourceQuantity>>("stockRatios");
+
         [HarmonyPostfix]
         private static void Postfix(Market __instance)
         {
             if (!EconomyOverhaulPlugin.Enabled.Value) return;
 
+            // Fix 1: Ensure minimum resupply rate
             float min = EconomyOverhaulPlugin.MinResupplyRate.Value;
             if (__instance.resupplyRatePerHour < min)
             {
@@ -100,6 +125,31 @@ namespace SpacefleetEconomyOverhaul
                     "Fixed resupplyRate " + __instance.resupplyRatePerHour.ToString("F1") +
                     " -> " + min.ToString("F1") + " on " + __instance.name);
                 __instance.resupplyRatePerHour = min;
+            }
+
+            // Fix 2: Cap fuel stockRatios immediately
+            float fuelCap = EconomyOverhaulPlugin.FuelReserveMaxRatio.Value;
+            List<ResourceQuantity> stockRatios = stockRatiosRef(__instance);
+            if (stockRatios != null)
+            {
+                for (int i = 0; i < stockRatios.Count; i++)
+                {
+                    ResourceQuantity rq = stockRatios[i];
+                    if (rq.resource == null) continue;
+
+                    if (EconomyOverhaulPlugin.IsFuel(rq.resource))
+                    {
+                        float currentRatio = rq.quantity * 0.01f;
+                        if (currentRatio > fuelCap)
+                        {
+                            EconomyOverhaulPlugin.Log.LogInfo(
+                                "Capped fuel stockRatio " + rq.resource.name +
+                                " from " + currentRatio.ToString("F2") +
+                                " to " + fuelCap.ToString("F2") + " on " + __instance.name);
+                            rq.quantity = fuelCap * 100f;
+                        }
+                    }
+                }
             }
         }
     }
@@ -211,10 +261,16 @@ namespace SpacefleetEconomyOverhaul
     }
 
     // =========================================================================
-    // PATCH 3: CanBuy – enforce MinimumTradeQuantity + resupply rate fallback
+    // PATCH 3: CanBuy – cap fuel reserves so stations actually sell fuel
     // =========================================================================
-    // Market.Start should have fixed resupplyRatePerHour, but we also handle
-    // edge cases. Lightweight POSTFIX — zero reflection, no method replacement.
+    // ROOT CAUSE OF "NO AVAILABLE FUEL":
+    // Vanilla CanBuy: available = inventory - (storageMax * stockRatio)
+    // When stockRatio is high (e.g. 5.0 from v0.3.0 bug, or vanilla values),
+    // minStockQuantity exceeds actual inventory → available = 0 → no fuel sold.
+    // Also: resupplyRatePerHour caps trades per hour to a trickle.
+    //
+    // Fix: For fuel, cap the reserve to FuelReserveMaxRatio of actual inventory
+    // and raise the effective resupply rate. This lets stations sell fuel freely.
     // =========================================================================
     [HarmonyPatch(typeof(Market), "CanBuy")]
     internal static class MarketCanBuyPatch
@@ -222,37 +278,32 @@ namespace SpacefleetEconomyOverhaul
         [HarmonyPostfix]
         private static void Postfix(Market __instance, ResourceDefinition resource, float quantity, int factionCredits, ref float __result)
         {
-            if (!EconomyOverhaulPlugin.Enabled.Value) return;
+            if (!EconomyOverhaulPlugin.Enabled.Value || resource == null) return;
 
-            // If vanilla returned 0, check if resupply rate was the bottleneck
-            if (__result <= 0f && resource != null && quantity > 0f && factionCredits > 0)
+            bool isFuel = EconomyOverhaulPlugin.IsFuel(resource);
+
+            // FUEL FIX: Recalculate with capped reserve instead of vanilla's broken one
+            if (isFuel && quantity > 0f && factionCredits > 0)
             {
-                float available = __instance.GetQuantityAvailable(resource);
                 float quantityOf = __instance.GetQuantityOf(resource);
+                if (quantityOf < 0.5f) { __result = 0f; return; }
 
-                if (available > 0.5f && quantityOf > 0.5f)
-                {
-                    bool isFuel = resource.type == ResourceType.VOLATILES ||
-                                  resource.type == ResourceType.DT_FUEL ||
-                                  resource.type == ResourceType.DH_FUEL;
+                // Cap how much fuel a station can hold back
+                float reserveMax = EconomyOverhaulPlugin.FuelReserveMaxRatio.Value;
+                float reserved = quantityOf * reserveMax;
+                float available = Mathf.Max(0f, quantityOf - reserved);
 
-                    float minEffectiveRate = EconomyOverhaulPlugin.MinResupplyRate.Value *
-                        (isFuel ? EconomyOverhaulPlugin.FuelResupplyMultiplier.Value : 1f);
+                // Effective resupply rate for fuel
+                float effectiveRate = Mathf.Max(
+                    __instance.resupplyRatePerHour * 10f,
+                    EconomyOverhaulPlugin.MinResupplyRate.Value * EconomyOverhaulPlugin.FuelResupplyMultiplier.Value);
 
-                    float currentEffectiveRate = __instance.resupplyRatePerHour *
-                        (isFuel ? 10f : 1f);
+                int price = Mathf.Max(1, __instance.GetCurrentPrice(resource, true));
+                float affordable = Mathf.Floor((float)factionCredits / (float)price);
 
-                    if (currentEffectiveRate < minEffectiveRate)
-                    {
-                        int price = Mathf.Max(1, __instance.GetCurrentPrice(resource, true));
-                        float affordable = Mathf.Floor((float)factionCredits / (float)price);
-
-                        if (affordable > 0f)
-                        {
-                            __result = Mathf.Floor(Mathf.Min(quantity, available, quantityOf, affordable, minEffectiveRate));
-                        }
-                    }
-                }
+                float result = Mathf.Floor(Mathf.Min(quantity, available, affordable, effectiveRate));
+                // Only override if our result is better than vanilla's
+                __result = Mathf.Max(__result, result);
             }
 
             // Enforce MinimumTradeQuantity
@@ -266,8 +317,10 @@ namespace SpacefleetEconomyOverhaul
     // PATCH 4: Stock Ratio Recovery on Factory.ProductionCycle
     // =========================================================================
     // Factory.AddResourcesDelayed drives stockRatios for outputs to 0 on init.
-    // Once at 0, they never recover. This runs after each daily production cycle
-    // and gradually increases stockRatios for overproduced resources.
+    // Once at 0, they never recover, which breaks GetMinStockQuantity (returns 0)
+    // and makes GetCurrentPrice use idealStockRatio instead of real inventory.
+    // This gradually recovers stockRatios to a sane value (0.15 by default).
+    // For fuel specifically, we also cap stockRatios to prevent over-reservation.
     // =========================================================================
     [HarmonyPatch(typeof(Factory), "ProductionCycle")]
     internal static class StockRatioRecoveryPatch
@@ -300,7 +353,8 @@ namespace SpacefleetEconomyOverhaul
 
             float threshold = EconomyOverhaulPlugin.StockRatioRecoveryThreshold.Value;
             float recoveryRate = EconomyOverhaulPlugin.StockRatioRecoveryRate.Value;
-            float targetRatio = EconomyOverhaulPlugin.SurplusDumpRatio.Value;
+            float targetRatio = Mathf.Min(EconomyOverhaulPlugin.SurplusDumpRatio.Value, 0.5f);
+            float fuelReserveCap = EconomyOverhaulPlugin.FuelReserveMaxRatio.Value;
 
             // Collect output resources from factory recipes
             HashSet<ResourceDefinition> outputResources = new HashSet<ResourceDefinition>();
@@ -332,8 +386,17 @@ namespace SpacefleetEconomyOverhaul
                 ResourceQuantity rq = stockRatios[i];
                 if (rq.resource == null || !outputResources.Contains(rq.resource)) continue;
 
-                // Raw quantity stores stockRatio * 100 (GetStockRatio returns quantity * 0.01)
                 float currentStockRatio = rq.quantity * 0.01f;
+                bool isFuel = EconomyOverhaulPlugin.IsFuel(rq.resource);
+
+                // For fuel: cap stockRatio to prevent stations hoarding fuel
+                if (isFuel && currentStockRatio > fuelReserveCap)
+                {
+                    rq.quantity = fuelReserveCap * 100f;
+                    continue;
+                }
+
+                // For non-fuel outputs with 0 stockRatio: recover gradually
                 if (currentStockRatio >= targetRatio) continue;
 
                 float qty = market.inventory.GetQuantityOf(rq.resource);
@@ -341,7 +404,8 @@ namespace SpacefleetEconomyOverhaul
 
                 if (fillRatio > threshold)
                 {
-                    float newStockRatio = Mathf.Min(currentStockRatio + recoveryRate, targetRatio);
+                    float effectiveTarget = isFuel ? Mathf.Min(targetRatio, fuelReserveCap) : targetRatio;
+                    float newStockRatio = Mathf.Min(currentStockRatio + recoveryRate, effectiveTarget);
                     rq.quantity = newStockRatio * 100f;
                 }
             }
