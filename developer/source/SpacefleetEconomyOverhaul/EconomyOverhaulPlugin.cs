@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace SpacefleetEconomyOverhaul
 {
-    [BepInPlugin("local.spacefleet.economy-overhaul", "Spacefleet Economy Overhaul", "0.4.0")]
+    [BepInPlugin("local.spacefleet.economy-overhaul", "Spacefleet Economy Overhaul", "0.4.1")]
     public sealed class EconomyOverhaulPlugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -60,7 +60,8 @@ namespace SpacefleetEconomyOverhaul
             MinimumTradeQuantity = Config.Bind("Trade", "MinimumTradeQuantity", 0.5f,
                 "Reject market trades smaller than this to avoid dust trades.");
             MinimumAutoTraderProfitMargin = Config.Bind("Trade", "MinimumAutoTraderProfitMargin", 0.05f,
-                "Lowest profit margin auto-traders are allowed to relax to.");
+                "Minimum starting profit margin for auto-traders (vanilla default is 0.15). " +
+                "Raise to make traders pickier; the relaxation mechanism still lets them accept worse trades after repeated failures.");
 
             MinResupplyRate = Config.Bind("TradeFlow", "MinResupplyRate", 2.0f,
                 "Minimum resupplyRatePerHour enforced on all markets. Vanilla can be 0, which blocks ALL trade.");
@@ -88,7 +89,7 @@ namespace SpacefleetEconomyOverhaul
 
             harmony = new Harmony("local.spacefleet.economy-overhaul");
             harmony.PatchAll();
-            Logger.LogInfo("Economy Overhaul v0.4.0 loaded – fuel drought fix, stock ratio bugfix.");
+            Logger.LogInfo("Economy Overhaul v0.4.1 loaded – trader deadlock fix.");
         }
 
         private void OnDestroy()
@@ -475,9 +476,14 @@ namespace SpacefleetEconomyOverhaul
             if (!EconomyOverhaulPlugin.Enabled.Value || __instance == null) return;
 
             float minimum = Mathf.Max(0f, EconomyOverhaulPlugin.MinimumAutoTraderProfitMargin.Value);
-            if (__instance.currentMinProfitMargin >= 0f && __instance.currentMinProfitMargin < minimum)
+            // Only raise the *base* profit margin, never clamp currentMinProfitMargin.
+            // Vanilla halves currentMinProfitMargin on each failed attempt until it
+            // reaches −100000 ("accept any trade"). If we clamp currentMinProfitMargin
+            // instead, the trader can never reach that escape value and gets stuck
+            // endlessly re-evaluating targets without committing to a route.
+            if (__instance.minProfitMargin < minimum)
             {
-                __instance.currentMinProfitMargin = minimum;
+                __instance.minProfitMargin = minimum;
             }
         }
     }

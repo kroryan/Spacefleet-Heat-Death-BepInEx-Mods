@@ -4,7 +4,7 @@
 fuel market deadlocks, adjusts prices based on real supply/demand, and ensures
 trade flow remains sustainable long-term.
 
-**Version**: 0.4.0
+**Version**: 0.4.1
 **GUID**: `local.spacefleet.economy-overhaul`
 **Hotkey**: None (background patches)
 
@@ -63,7 +63,10 @@ v0.4.0 found and fixed the root cause: inflated fuel `stockRatios` made
 
 Also patches:
 
-- `Trader.TradeCycle` / `Trader.Trade`: Enforces minimum auto-trader profit margin
+- `Trader.TradeCycle` / `Trader.Trade`: Raises the *base* profit margin
+  (`minProfitMargin`) to the configured minimum. Does NOT clamp
+  `currentMinProfitMargin`, so vanilla's relaxation loop (halving until
+  −100000) still works and traders never get stuck.
 
 ## Config
 
@@ -159,6 +162,14 @@ Now optimized via:
 The stock ratio recovery runs once per production cycle (daily), not per frame.
 
 ## Changelog
+
+### v0.4.1 — Trader Deadlock Fix
+- **Fixed**: Trading fleets endlessly switching target market without ever
+  arriving. Patch 6 (`TraderMarginPatch`) was clamping `currentMinProfitMargin`
+  to the configured floor (0.05), which prevented vanilla's relaxation loop
+  from reaching the −100000 "accept any trade" escape value. The trader would
+  oscillate between margin 0.05 and 0.025 forever, re-evaluating targets each
+  second. Fix: now raises `minProfitMargin` (the base/reset value) instead.
 
 ### v0.4.0 — Fuel Deadlock Fix
 - **Root cause fix**: `SurplusDumpRatio` default changed from 5.0 → 0.15

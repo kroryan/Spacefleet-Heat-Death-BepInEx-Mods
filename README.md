@@ -12,7 +12,7 @@ tools, battle debugger, and core game fixes.
 | **SpacefleetConsole** | In-game developer console with 20+ commands | `º` / `` ` `` |
 | **SpacefleetEconomyDebug** | Economy health monitor with resource/market/trader signals | `¡` |
 | **SpacefleetBattleDebug** | Real-time combat tracker with Harmony damage events + strategic fleet view | `+` |
-| **SpacefleetEconomyOverhaul** | Fuel deadlock fix + market price balancing (background) | — |
+| **SpacefleetEconomyOverhaul** | Fuel deadlock fix + trader route fix + market price balancing (background) | — |
 | **SpacefleetCoreFixes** | Money sound limiter + fleet delta-v softlock recovery (background) | — |
 
 ## Quick Install
