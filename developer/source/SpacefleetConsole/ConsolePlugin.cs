@@ -12,7 +12,7 @@ using UnityEngine.SceneManagement;
 
 namespace SpacefleetConsole
 {
-    [BepInPlugin("local.spacefleet.console", "Spacefleet Console", "0.1.0")]
+    [BepInPlugin("local.spacefleet.console", "Spacefleet Console", "0.2.0")]
     public sealed class ConsolePlugin : BaseUnityPlugin
     {
         private static ConsolePlugin instance;
@@ -35,6 +35,17 @@ namespace SpacefleetConsole
         private static bool skinChecked;
         private static GUISkin sharedSkin;
         private static Texture2D bgTexture;
+        private static Texture2D headerTex;
+        private static Texture2D sepTex;
+        private GUIStyle richLabel;
+        private bool stylesReady;
+
+        private const string COL_HEAD = "#CCDDF8";
+        private const string COL_DIM  = "#778899";
+        private const string COL_CRIT = "#FF6644";
+        private const string COL_INFO = "#AADDFF";
+
+        private static string C(string text, string color) { return "<color=" + color + ">" + text + "</color>"; }
 
         private void Awake()
         {
@@ -83,9 +94,10 @@ namespace SpacefleetConsole
             GUISkin skin = TryGetSharedSkin();
             GUISkin prev = GUI.skin;
             if (skin != null) GUI.skin = skin;
+            InitStyles();
 
             GUI.depth = -1001;
-            windowRect = GUI.Window(42011, windowRect, DrawWindow, "Spacefleet Console");
+            windowRect = GUI.Window(42011, windowRect, DrawWindow, "");
 
             GUI.skin = prev;
         }
@@ -120,34 +132,52 @@ namespace SpacefleetConsole
                     bgTexture.Apply();
                     UnityEngine.Object.DontDestroyOnLoad(bgTexture);
                 }
+                headerTex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                var hc = new Color(0.03f, 0.04f, 0.07f, 1f);
+                headerTex.SetPixels(new[] { hc, hc, hc, hc });
+                headerTex.Apply();
+                UnityEngine.Object.DontDestroyOnLoad(headerTex);
+                sepTex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                var sc = new Color(0.18f, 0.22f, 0.30f, 1f);
+                sepTex.SetPixels(new[] { sc, sc, sc, sc });
+                sepTex.Apply();
+                UnityEngine.Object.DontDestroyOnLoad(sepTex);
             }
             return sharedSkin;
         }
 
+        private void InitStyles()
+        {
+            if (stylesReady) return;
+            richLabel = new GUIStyle(GUI.skin.label)
+            {
+                richText = true,
+                wordWrap = false,
+                fontSize = 13,
+                padding = new RectOffset(2, 2, 1, 1)
+            };
+            stylesReady = true;
+        }
+
         private void DrawWindow(int id)
         {
-            if (bgTexture != null)
-                GUI.DrawTexture(new Rect(0, 0, windowRect.width, windowRect.height), bgTexture);
+            float w = windowRect.width, h = windowRect.height;
+            if (bgTexture  != null) GUI.DrawTexture(new Rect(0, 0, w, h),    bgTexture);
+            if (headerTex  != null) GUI.DrawTexture(new Rect(0, 0, w, 26f),  headerTex);
+            if (sepTex     != null) GUI.DrawTexture(new Rect(0, 26f, w, 1f), sepTex);
 
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Console");
-            GUILayout.FlexibleSpace();
-            if (GUILayout.Button(isMinimized ? "\u25a1" : "\u2014", GUILayout.Width(28f)))
+            GUI.Label(new Rect(8f, 4f, w - 70f, 18f),
+                "<b>" + C("CONSOLE", COL_HEAD) + "</b>",
+                richLabel ?? GUI.skin.label);
+            if (GUI.Button(new Rect(w - 52f, 3f, 22f, 20f), isMinimized ? "\u25a1" : "\u2014"))
             {
                 if (isMinimized) { windowRect.height = normalHeight; isMinimized = false; }
                 else { normalHeight = windowRect.height; windowRect.height = 36f; isMinimized = true; }
             }
-            if (GUILayout.Button("\u2715", GUILayout.Width(28f)))
-            {
+            if (GUI.Button(new Rect(w - 26f, 3f, 22f, 20f), "\u2715"))
                 isOpen = false;
-            }
-            GUILayout.EndHorizontal();
 
-            if (isMinimized)
-            {
-                GUI.DragWindow();
-                return;
-            }
+            if (isMinimized) { GUI.DragWindow(new Rect(0, 0, w, 26f)); return; }
 
             Event e = Event.current;
             if (e.type == EventType.KeyDown && (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter))
@@ -156,12 +186,12 @@ namespace SpacefleetConsole
                 e.Use();
             }
 
-            float scrollHeight = Mathf.Max(80f, windowRect.height - 125f);
-            scroll = GUILayout.BeginScrollView(scroll, GUILayout.Height(scrollHeight));
+            float contentH = h - 30f - 20f;
+            GUILayout.BeginArea(new Rect(4f, 30f, w - 8f, contentH));
+            float scrollH = Mathf.Max(60f, contentH - 40f);
+            scroll = GUILayout.BeginScrollView(scroll, GUILayout.Height(scrollH));
             foreach (string line in lines)
-            {
-                GUILayout.Label(line);
-            }
+                GUILayout.Label(line, richLabel ?? GUI.skin.label);
             GUILayout.EndScrollView();
 
             GUILayout.BeginHorizontal();
@@ -173,33 +203,26 @@ namespace SpacefleetConsole
                 RunInput();
             }
             GUILayout.EndHorizontal();
+            GUILayout.EndArea();
 
             if (e.type == EventType.KeyDown)
             {
-                if (e.keyCode == KeyCode.UpArrow)
-                {
-                    MoveHistory(-1);
-                    e.Use();
-                }
-                else if (e.keyCode == KeyCode.DownArrow)
-                {
-                    MoveHistory(1);
-                    e.Use();
-                }
+                if (e.keyCode == KeyCode.UpArrow) { MoveHistory(-1); e.Use(); }
+                else if (e.keyCode == KeyCode.DownArrow) { MoveHistory(1); e.Use(); }
             }
 
             GUI.FocusControl("ConsoleInput");
 
-            Rect handle = new Rect(windowRect.width - 18f, windowRect.height - 18f, 18f, 18f);
-            GUI.Label(handle, "\u25e2");
+            Rect handle = new Rect(w - 18f, h - 18f, 18f, 18f);
+            GUI.Label(handle, "<color=#223344>\u25e2</color>", richLabel ?? GUI.skin.label);
             if (Event.current.type == EventType.MouseDown && handle.Contains(Event.current.mousePosition))
             {
                 isResizing = true;
-                resizeOffset = new Vector2(windowRect.width, windowRect.height) - Event.current.mousePosition;
+                resizeOffset = new Vector2(w, h) - Event.current.mousePosition;
                 Event.current.Use();
                 return;
             }
-            GUI.DragWindow();
+            GUI.DragWindow(new Rect(0, 0, w, 26f));
         }
 
         private void RunInput()
@@ -392,11 +415,14 @@ namespace SpacefleetConsole
 
         private void AddLine(string line)
         {
-            lines.Add(line);
+            string colored = line;
+            if (line.StartsWith("> "))
+                colored = C(line, COL_INFO);
+            else if (line.StartsWith("ERROR:"))
+                colored = C(line, COL_CRIT);
+            lines.Add(colored);
             while (lines.Count > 200)
-            {
                 lines.RemoveAt(0);
-            }
         }
 
         private static void Require(string[] parts, int count, string usage)

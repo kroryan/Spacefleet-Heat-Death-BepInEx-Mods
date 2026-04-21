@@ -10,7 +10,6 @@ $mods = @(
     "SpacefleetModMenu",
     "SpacefleetConsole",
     "SpacefleetEconomyDebug",
-    "SpacefleetEconomyOverhaul",
     "SpacefleetBattleDebug"
 )
 

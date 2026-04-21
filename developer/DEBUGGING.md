@@ -17,7 +17,6 @@ Spacefleet Core Fixes loaded.
 Spacefleet Mod Menu loaded. Hotkey: Quote.
 Spacefleet Console loaded. Press º or BackQuote to open.
 Spacefleet Economy Debug loaded. Press ¡ to open.
-Spacefleet Economy Overhaul loaded.
 Spacefleet Battle Debug loaded. Press + to open.
 ```
 

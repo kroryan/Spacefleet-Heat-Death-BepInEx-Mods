@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace SpacefleetModMenu
 {
-    [BepInPlugin("local.spacefleet.mod-menu", "Spacefleet Mod Menu", "0.3.0")]
+    [BepInPlugin("local.spacefleet.mod-menu", "Spacefleet Mod Menu", "0.4.0")]
     public sealed class ModMenuPlugin : BaseUnityPlugin
     {
         private static ModMenuPlugin instance;
@@ -47,22 +47,24 @@ namespace SpacefleetModMenu
         private static GUIStyle skinHeader;
         private static GUIStyle skinDimLabel;
         private static Texture2D bgTexture;
+        private static Texture2D headerTex;
+        private static Texture2D sepTex;
 
         private static readonly Color ColBg        = new Color(0.05f, 0.06f, 0.08f, 1f);
         private static readonly Color ColPanel     = new Color(0.07f, 0.08f, 0.11f, 1f);
-        private static readonly Color ColBorder    = new Color(0f, 0.67f, 0.27f, 1f);
-        private static readonly Color ColBorderDim = new Color(0.15f, 0.25f, 0.18f, 1f);
-        private static readonly Color ColBtnNorm   = new Color(0.06f, 0.10f, 0.08f, 1f);
-        private static readonly Color ColBtnHover  = new Color(0.08f, 0.16f, 0.12f, 1f);
-        private static readonly Color ColBtnPress  = new Color(0f, 0.20f, 0.10f, 1f);
+        private static readonly Color ColBorder    = new Color(0.18f, 0.42f, 0.72f, 1f);
+        private static readonly Color ColBorderDim = new Color(0.12f, 0.20f, 0.35f, 1f);
+        private static readonly Color ColBtnNorm   = new Color(0.06f, 0.08f, 0.14f, 1f);
+        private static readonly Color ColBtnHover  = new Color(0.10f, 0.16f, 0.28f, 1f);
+        private static readonly Color ColBtnPress  = new Color(0.08f, 0.18f, 0.36f, 1f);
         private static readonly Color ColField     = new Color(0.04f, 0.05f, 0.06f, 1f);
         private static readonly Color ColFieldFoc  = new Color(0.05f, 0.06f, 0.08f, 1f);
-        private static readonly Color ColToggleOn  = new Color(0f, 0.20f, 0.10f, 1f);
+        private static readonly Color ColToggleOn  = new Color(0.08f, 0.18f, 0.36f, 1f);
         private static readonly Color ColScrollBg  = new Color(0.04f, 0.05f, 0.06f, 1f);
-        private static readonly Color ColScrollTh  = new Color(0.10f, 0.25f, 0.18f, 1f);
-        private static readonly Color ColText      = new Color(0.69f, 0.77f, 0.69f, 1f);
-        private static readonly Color ColTextBrt   = new Color(0f, 1f, 0.53f, 1f);
-        private static readonly Color ColTextDim   = new Color(0.40f, 0.47f, 0.40f, 1f);
+        private static readonly Color ColScrollTh  = new Color(0.15f, 0.25f, 0.42f, 1f);
+        private static readonly Color ColText      = new Color(0.70f, 0.78f, 0.88f, 1f);
+        private static readonly Color ColTextBrt   = new Color(0.80f, 0.92f, 1.0f,  1f);
+        private static readonly Color ColTextDim   = new Color(0.42f, 0.50f, 0.62f, 1f);
 
         public static GUISkin GetSharedSkin()
         {
@@ -217,6 +219,8 @@ namespace SpacefleetModMenu
             skinDimLabel.normal.textColor = ColTextDim;
 
             RebuildBgTexture();
+            headerTex = MakeTex(new Color(0.03f, 0.04f, 0.07f, 1f));
+            sepTex    = MakeTex(new Color(0.18f, 0.22f, 0.30f, 1f));
         }
 
         private static void RebuildBgTexture()
@@ -331,27 +335,20 @@ namespace SpacefleetModMenu
 
         private void DrawWindow(int id)
         {
-            if (bgTexture != null)
-                GUI.DrawTexture(new Rect(0, 0, windowRect.width, windowRect.height), bgTexture);
+            float w = windowRect.width, h = windowRect.height;
+            if (bgTexture  != null) GUI.DrawTexture(new Rect(0, 0, w, h),    bgTexture);
+            if (headerTex  != null) GUI.DrawTexture(new Rect(0, 0, w, 26f),  headerTex);
+            if (sepTex     != null) GUI.DrawTexture(new Rect(0, 26f, w, 1f), sepTex);
 
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("<b><color=#00FF88>MOD MENU</color></b>  <color=#667766>(" + Chainloader.PluginInfos.Count + " plugins)</color>", skinRichLabel);
-            GUILayout.FlexibleSpace();
-            if (GUILayout.Button(isMinimized ? "\u25a1" : "\u2014", GUILayout.Width(28f)))
-            {
+            GUI.Label(new Rect(8f, 4f, w - 70f, 18f),
+                "<b><color=#CCDDF8>MOD MENU</color></b>  <color=#778899>(" + Chainloader.PluginInfos.Count + " plugins)</color>",
+                skinRichLabel ?? GUI.skin.label);
+            if (GUI.Button(new Rect(w - 52f, 3f, 22f, 20f), isMinimized ? "\u25a1" : "\u2014"))
                 ToggleMinimize();
-            }
-            if (GUILayout.Button("\u2715", GUILayout.Width(28f)))
-            {
+            if (GUI.Button(new Rect(w - 26f, 3f, 22f, 20f), "\u2715"))
                 isOpen = false;
-            }
-            GUILayout.EndHorizontal();
 
-            if (isMinimized)
-            {
-                GUI.DragWindow();
-                return;
-            }
+            if (isMinimized) { GUI.DragWindow(new Rect(0, 0, w, 26f)); return; }
 
             if (Time.unscaledTime > lastDetectionTime + 5f)
             {
@@ -365,10 +362,10 @@ namespace SpacefleetModMenu
                 lastDisabledScanTime = Time.unscaledTime;
             }
 
+            GUILayout.BeginArea(new Rect(4f, 30f, w - 8f, h - 52f));
             scroll = GUILayout.BeginScrollView(scroll);
 
-            // Active plugins
-            GUILayout.Label("<color=#00FF88>ACTIVE PLUGINS</color>", skinHeader);
+            GUILayout.Label("<color=#CCDDF8>ACTIVE PLUGINS</color>", skinHeader);
             GUILayout.Space(2f);
 
             foreach (var plugin in Chainloader.PluginInfos.Values.OrderBy(p => p.Metadata.Name, StringComparer.OrdinalIgnoreCase))
@@ -376,53 +373,40 @@ namespace SpacefleetModMenu
                 GUILayout.BeginVertical(GUI.skin.box);
 
                 bool isPending = pendingDisable.Contains(plugin.Metadata.GUID);
-                string nameColor = isPending ? "#FF6644" : "#00FF88";
-                GUILayout.Label("<color=" + nameColor + "><b>" + plugin.Metadata.Name + "</b></color>  <color=#667766>v" + plugin.Metadata.Version + "</color>", skinRichLabel);
-                GUILayout.Label("<color=#667766>GUID: " + plugin.Metadata.GUID + "  |  " + SafeFileName(plugin.Location) + "</color>", skinDimLabel);
+                string nameColor = isPending ? "#FF6644" : "#CCDDF8";
+                GUILayout.Label("<color=" + nameColor + "><b>" + plugin.Metadata.Name + "</b></color>  <color=#778899>v" + plugin.Metadata.Version + "</color>", skinRichLabel);
+                GUILayout.Label("<color=#778899>GUID: " + plugin.Metadata.GUID + "  |  " + SafeFileName(plugin.Location) + "</color>", skinDimLabel);
 
                 if (isPending)
-                {
                     GUILayout.Label("<color=#FF6644>PENDING DISABLE — restart game to apply</color>", skinRichLabel);
-                }
 
                 GUILayout.BeginHorizontal();
 
-                // Hotkey inline
                 HotkeyTarget target = FindTarget(plugin.Instance?.GetType());
                 if (target != null)
                 {
-                    GUILayout.Label("Hotkey: <color=#00FF88>" + target.GetSummary() + "</color>", skinRichLabel, GUILayout.Width(250f));
+                    GUILayout.Label("Hotkey: <color=#CCDDF8>" + target.GetSummary() + "</color>", skinRichLabel, GUILayout.Width(250f));
                     if (GUILayout.Button(captureTarget == target ? "Press key..." : "Change", GUILayout.Width(90f)))
-                    {
                         captureTarget = target;
-                    }
                     if (GUILayout.Button("Clear", GUILayout.Width(55f)))
-                    {
                         target.Set(KeyCode.None.ToString(), "");
-                    }
                 }
 
                 GUILayout.FlexibleSpace();
 
-                // Enable/Disable
                 bool isSelf = plugin.Metadata.GUID == "local.spacefleet.mod-menu";
                 if (!isSelf && !isPending)
                 {
                     if (GUILayout.Button("Disable", GUILayout.Width(70f)))
-                    {
                         DisableMod(plugin);
-                    }
                 }
                 else if (isPending)
                 {
                     if (GUILayout.Button("Undo", GUILayout.Width(70f)))
-                    {
                         UndoDisable(plugin);
-                    }
                 }
                 GUILayout.EndHorizontal();
 
-                // Config editor
                 string cfgPath = GetConfigPath(plugin.Metadata.GUID);
                 if (cfgPath != null)
                 {
@@ -439,42 +423,35 @@ namespace SpacefleetModMenu
                         if (cs.IsExpanded) cs.Load(cfgPath);
                     }
                     if (cs.IsExpanded && GUILayout.Button("Reload", GUILayout.Width(65f)))
-                    {
                         cs.Load(cfgPath);
-                    }
                     GUILayout.EndHorizontal();
 
                     if (cs.IsExpanded)
-                    {
                         DrawConfigEntries(cs, cfgPath);
-                    }
                 }
 
                 GUILayout.EndVertical();
             }
 
-            // Disabled mods
             if (disabledMods.Count > 0)
             {
                 GUILayout.Space(8f);
-                GUILayout.Label("<color=#FF6644>DISABLED MODS</color>  <color=#667766>(restart to apply changes)</color>", skinHeader);
+                GUILayout.Label("<color=#FF6644>DISABLED MODS</color>  <color=#778899>(restart to apply changes)</color>", skinHeader);
                 GUILayout.Space(2f);
 
                 foreach (var dm in disabledMods)
                 {
                     GUILayout.BeginHorizontal(GUI.skin.box);
-                    GUILayout.Label("<color=#667766>" + dm.FileName + "</color>", skinRichLabel);
+                    GUILayout.Label("<color=#778899>" + dm.FileName + "</color>", skinRichLabel);
                     GUILayout.FlexibleSpace();
                     if (GUILayout.Button("Enable", GUILayout.Width(70f)))
-                    {
                         EnableMod(dm);
-                    }
                     GUILayout.EndHorizontal();
                 }
             }
 
             GUILayout.Space(6f);
-            GUILayout.Label("<color=#667766>Tip: press a normal key for KeyCode hotkeys, or a typed character for layout-specific keys like \u00ba or \u00a1.</color>", skinDimLabel);
+            GUILayout.Label("<color=#778899>Tip: press a normal key for KeyCode hotkeys, or a typed character for layout-specific keys like \u00ba or \u00a1.</color>", skinDimLabel);
             GUILayout.EndScrollView();
 
             GUILayout.Space(4f);
@@ -489,6 +466,7 @@ namespace SpacefleetModMenu
             }
             GUILayout.Label(" " + cfgBgAlpha.Value + "%", skinDimLabel, GUILayout.Width(50f));
             GUILayout.EndHorizontal();
+            GUILayout.EndArea();
 
             DrawResizeHandle();
         }
@@ -648,16 +626,17 @@ namespace SpacefleetModMenu
 
         private void DrawResizeHandle()
         {
-            Rect handle = new Rect(windowRect.width - 18f, windowRect.height - 18f, 18f, 18f);
-            GUI.Label(handle, "<color=#335533>\u25e2</color>", skinRichLabel);
+            float w = windowRect.width;
+            Rect handle = new Rect(w - 18f, windowRect.height - 18f, 18f, 18f);
+            GUI.Label(handle, "<color=#223344>\u25e2</color>", skinRichLabel);
             if (Event.current.type == EventType.MouseDown && handle.Contains(Event.current.mousePosition))
             {
                 isResizing = true;
-                resizeOffset = new Vector2(windowRect.width, windowRect.height) - Event.current.mousePosition;
+                resizeOffset = new Vector2(w, windowRect.height) - Event.current.mousePosition;
                 Event.current.Use();
                 return;
             }
-            GUI.DragWindow();
+            GUI.DragWindow(new Rect(0, 0, w, 26f));
         }
 
         #endregion

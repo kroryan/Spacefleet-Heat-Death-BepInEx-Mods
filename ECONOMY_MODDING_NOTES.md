@@ -331,46 +331,6 @@ Factory.ExecuteBatchProduction
    SlowIndustrialGrowth
    ```
 
-## Recommended Next Economy Patch
-
-Implemented in `SpacefleetEconomyOverhaul`: the safest gameplay-facing economy
-patch is:
-
-```text
-Postfix Market.GetCurrentPrice(ResourceDefinition resource, bool isBuying)
-```
-
-With configurable multipliers:
-
-```text
-buySpreadMultiplier
-sellSpreadMultiplier
-scarcityMultiplier
-abundanceDiscountMultiplier
-minimumPriceRatio
-maximumPriceRatio
-```
-
-That lets us tune the economy without rewriting trade execution or inventory
-mutation.
-
-Current `SpacefleetEconomyOverhaul` behavior:
-
-```text
-Patch Market.GetCurrentPrice(ResourceDefinition resource, bool isBuying)
-Patch Market.CanBuy(ResourceDefinition resource, float quantity, int factionCredits)
-Patch Trader.TradeCycle(...)
-Patch Trader.Trade(...)
-Keep vanilla trade execution, inventory mutation, and trader decisions intact.
-Apply additional local scarcity and abundance pressure.
-Apply global demand/supply pressure.
-Clamp final price between configurable base-price ratios.
-Cache reflection and multiplier results so price queries do not recalculate the
-whole economy every frame.
-Reject dust trades below MinimumTradeQuantity.
-Clamp auto-trader margin relaxation to MinimumAutoTraderProfitMargin.
-```
-
 ## Economy Review Findings
 
 The economy review focused on `Market`, `GlobalMarket`, `Trader`,
@@ -387,11 +347,12 @@ Trader.TradeCycle relaxes currentMinProfitMargin when no profitable route exists
 GlobalMarket.UpdateAveragePrices recomputes buy/sell averages across all markets.
 ```
 
-Implemented fixes:
+The safest gameplay-facing economy patch is:
 
 ```text
-Price multiplier caching prevents expensive work on every price query.
-MinimumTradeQuantity blocks tiny positive trades before they enter execution.
-MinimumAutoTraderProfitMargin keeps automated trade from degrading into bad deals.
-Economy Debug now exposes actionable player-facing signals instead of raw spam.
+Postfix Market.GetCurrentPrice(ResourceDefinition resource, bool isBuying)
 ```
+
+This lets the economy be tuned without rewriting trade execution or inventory
+mutation. See `SpacefleetEconomyDebug` for live diagnostics via the station
+inspector, resource signals, market stress, and trader health views.

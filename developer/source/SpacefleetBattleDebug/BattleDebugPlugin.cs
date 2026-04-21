@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace SpacefleetBattleDebug
 {
-    [BepInPlugin("local.spacefleet.battle-debug", "Spacefleet Battle Debug", "0.2.0")]
+    [BepInPlugin("local.spacefleet.battle-debug", "Spacefleet Battle Debug", "0.3.0")]
     public sealed class BattleDebugPlugin : BaseUnityPlugin
     {
         #region Constants
@@ -28,8 +28,8 @@ namespace SpacefleetBattleDebug
         private const string COL_DEAD = "#FF4444";
         private const string COL_DISINT = "#FF0000";
         private const string COL_INFO = "#AADDFF";
-        private const string COL_DIM = "#999999";
-        private const string COL_HEAD = "#FFFFFF";
+        private const string COL_DIM  = "#778899";
+        private const string COL_HEAD = "#CCDDF8";
 
         #endregion
 
@@ -89,6 +89,8 @@ namespace SpacefleetBattleDebug
         private static bool skinChecked;
         private static GUISkin sharedSkin;
         private static Texture2D bgTexture;
+        private static Texture2D headerTex;
+        private static Texture2D sepTex;
 
         private float nextRefresh;
         private bool isTactical;
@@ -256,6 +258,16 @@ namespace SpacefleetBattleDebug
                     bgTexture.Apply();
                     UnityEngine.Object.DontDestroyOnLoad(bgTexture);
                 }
+                headerTex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                var hc = new Color(0.03f, 0.04f, 0.07f, 1f);
+                headerTex.SetPixels(new[] { hc, hc, hc, hc });
+                headerTex.Apply();
+                UnityEngine.Object.DontDestroyOnLoad(headerTex);
+                sepTex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                var sc = new Color(0.18f, 0.22f, 0.30f, 1f);
+                sepTex.SetPixels(new[] { sc, sc, sc, sc });
+                sepTex.Apply();
+                UnityEngine.Object.DontDestroyOnLoad(sepTex);
             }
             return sharedSkin;
         }
@@ -495,55 +507,52 @@ namespace SpacefleetBattleDebug
 
         private void DrawInfoWindow(int id)
         {
-            if (bgTexture != null)
-                GUI.DrawTexture(new Rect(0, 0, infoRect.width, infoRect.height), bgTexture);
+            float w = infoRect.width, h = infoRect.height;
+            if (bgTexture  != null) GUI.DrawTexture(new Rect(0, 0, w, h),    bgTexture);
+            if (headerTex  != null) GUI.DrawTexture(new Rect(0, 0, w, 26f),  headerTex);
+            if (sepTex     != null) GUI.DrawTexture(new Rect(0, 26f, w, 1f), sepTex);
 
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("<b><size=14>Battle Debug</size></b>  " + C(modeLabel, COL_INFO), richLabel);
-            GUILayout.FlexibleSpace();
+            GUI.Label(new Rect(8f, 4f, w - 200f, 18f),
+                "<b>" + C("BATTLE DEBUG", COL_HEAD) + "</b>  " + C(modeLabel, COL_INFO),
+                richLabel ?? GUI.skin.label);
+
             if (isTactical)
             {
-                showWeapons = GUILayout.Toggle(showWeapons, "Weapons", GUILayout.Width(75f));
-                showHeat = GUILayout.Toggle(showHeat, "Heat", GUILayout.Width(50f));
-                if (!showFeed && GUILayout.Button("Feed", GUILayout.Width(50f)))
+                showWeapons = GUI.Toggle(new Rect(w - 222f, 5f, 75f, 16f), showWeapons, "Weapons");
+                showHeat    = GUI.Toggle(new Rect(w - 143f, 5f, 55f, 16f), showHeat,    "Heat");
+                if (!showFeed && GUI.Button(new Rect(w - 84f, 3f, 50f, 20f), "Feed"))
                     showFeed = true;
             }
-            if (GUILayout.Button(isInfoMinimized ? "\u25a1" : "\u2014", GUILayout.Width(28f)))
+            if (GUI.Button(new Rect(w - 52f, 3f, 22f, 20f), isInfoMinimized ? "\u25a1" : "\u2014"))
             {
                 if (isInfoMinimized) { infoRect.height = infoNormalHeight; isInfoMinimized = false; }
                 else { infoNormalHeight = infoRect.height; infoRect.height = 36f; isInfoMinimized = true; }
             }
-            if (GUILayout.Button("\u2715", GUILayout.Width(28f)))
+            if (GUI.Button(new Rect(w - 26f, 3f, 22f, 20f), "\u2715"))
                 showInfo = false;
-            GUILayout.EndHorizontal();
 
-            if (isInfoMinimized)
-            {
-                GUI.DragWindow();
-                return;
-            }
+            if (isInfoMinimized) { GUI.DragWindow(new Rect(0, 0, w, 26f)); return; }
 
+            GUILayout.BeginArea(new Rect(4f, 30f, w - 8f, h - 52f));
             GUILayout.Label(overviewText, richLabel);
-
             infoScroll = GUILayout.BeginScrollView(infoScroll);
-
             if (isTactical)
                 DrawTacticalContent();
             else
                 DrawStrategicContent();
-
             GUILayout.EndScrollView();
+            GUILayout.EndArea();
 
-            Rect handle = new Rect(infoRect.width - 18f, infoRect.height - 18f, 18f, 18f);
-            GUI.Label(handle, "\u25e2");
+            Rect handle = new Rect(w - 18f, h - 18f, 18f, 18f);
+            GUI.Label(handle, "<color=#223344>\u25e2</color>", richLabel ?? GUI.skin.label);
             if (Event.current.type == EventType.MouseDown && handle.Contains(Event.current.mousePosition))
             {
                 isResizingInfo = true;
-                infoResizeOffset = new Vector2(infoRect.width, infoRect.height) - Event.current.mousePosition;
+                infoResizeOffset = new Vector2(w, h) - Event.current.mousePosition;
                 Event.current.Use();
                 return;
             }
-            GUI.DragWindow();
+            GUI.DragWindow(new Rect(0, 0, w, 26f));
         }
 
         private void DrawTacticalContent()
@@ -695,29 +704,28 @@ namespace SpacefleetBattleDebug
 
         private void DrawFeedWindow(int id)
         {
-            if (bgTexture != null)
-                GUI.DrawTexture(new Rect(0, 0, feedRect.width, feedRect.height), bgTexture);
+            float w = feedRect.width, h = feedRect.height;
+            if (bgTexture  != null) GUI.DrawTexture(new Rect(0, 0, w, h),    bgTexture);
+            if (headerTex  != null) GUI.DrawTexture(new Rect(0, 0, w, 26f),  headerTex);
+            if (sepTex     != null) GUI.DrawTexture(new Rect(0, 26f, w, 1f), sepTex);
 
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("<b>Battle Feed</b>" + (harmonyActive ? "" : C(" (polling only)", COL_WARN)), richLabel);
-            GUILayout.FlexibleSpace();
-            if (GUILayout.Button("Clear", GUILayout.Width(50f)))
+            GUI.Label(new Rect(8f, 4f, w - 130f, 18f),
+                "<b>" + C("BATTLE FEED", COL_HEAD) + "</b>" + (harmonyActive ? "" : "  " + C("(polling only)", COL_WARN)),
+                richLabel ?? GUI.skin.label);
+
+            if (GUI.Button(new Rect(w - 106f, 3f, 50f, 20f), "Clear"))
                 feed.Clear();
-            if (GUILayout.Button(isFeedMinimized ? "\u25a1" : "\u2014", GUILayout.Width(28f)))
+            if (GUI.Button(new Rect(w - 52f, 3f, 22f, 20f), isFeedMinimized ? "\u25a1" : "\u2014"))
             {
                 if (isFeedMinimized) { feedRect.height = feedNormalHeight; isFeedMinimized = false; }
                 else { feedNormalHeight = feedRect.height; feedRect.height = 36f; isFeedMinimized = true; }
             }
-            if (GUILayout.Button("\u2715", GUILayout.Width(28f)))
+            if (GUI.Button(new Rect(w - 26f, 3f, 22f, 20f), "\u2715"))
                 showFeed = false;
-            GUILayout.EndHorizontal();
 
-            if (isFeedMinimized)
-            {
-                GUI.DragWindow();
-                return;
-            }
+            if (isFeedMinimized) { GUI.DragWindow(new Rect(0, 0, w, 26f)); return; }
 
+            GUILayout.BeginArea(new Rect(4f, 30f, w - 8f, h - 52f));
             feedScroll = GUILayout.BeginScrollView(feedScroll);
             if (feed.Count == 0)
                 GUILayout.Label(C("Waiting for combat events...", COL_DIM), richLabel);
@@ -725,17 +733,18 @@ namespace SpacefleetBattleDebug
                 for (int i = 0; i < feed.Count; i++)
                     GUILayout.Label(feed[i].text, richLabel);
             GUILayout.EndScrollView();
+            GUILayout.EndArea();
 
-            Rect handle = new Rect(feedRect.width - 18f, feedRect.height - 18f, 18f, 18f);
-            GUI.Label(handle, "\u25e2");
+            Rect handle = new Rect(w - 18f, h - 18f, 18f, 18f);
+            GUI.Label(handle, "<color=#223344>\u25e2</color>", richLabel ?? GUI.skin.label);
             if (Event.current.type == EventType.MouseDown && handle.Contains(Event.current.mousePosition))
             {
                 isResizingFeed = true;
-                feedResizeOffset = new Vector2(feedRect.width, feedRect.height) - Event.current.mousePosition;
+                feedResizeOffset = new Vector2(w, h) - Event.current.mousePosition;
                 Event.current.Use();
                 return;
             }
-            GUI.DragWindow();
+            GUI.DragWindow(new Rect(0, 0, w, 26f));
         }
 
         #endregion
